@@ -1,0 +1,47 @@
+MIT License
+
+Copyright (c) 2026 FormatForge contributors
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+---
+
+Third-party components
+
+Release builds bundle the following tools inside the application. They are
+separate programs, invoked as subprocesses; none of their code is linked into
+FormatForge itself.
+
+  ffmpeg / ffprobe
+      Licence: LGPL 2.1 or later, with optional GPL components depending on
+               how the binary was configured. The builds used here are
+               unmodified upstream releases from osxexperts.net and
+               evermeet.cx.
+      Source:  https://ffmpeg.org/
+
+  7-Zip (via p7zip)
+      Licence: LGPL 2.1 or later, with the unRAR restriction.
+      Source:  https://github.com/jinfeihan57/p7zip
+
+  libwebp (the cwebp command-line encoder)
+      Licence: BSD 3-Clause.
+      Source:  https://chromium.googlesource.com/webm/libwebp
+
+Source builds do not include any of these; they use whatever the developer has
+installed locally.

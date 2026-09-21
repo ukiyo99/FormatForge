@@ -1,0 +1,1631 @@
+{
+ "articles": {
+  "arch": {
+   "principle": "Toute l'application repose sur deux partis pris : <b>chaque outil doit posséder son propre état de travail</b>, et <b>des fonctions de nature différente ne devraient pas partager le même flux d'interaction</b>. Le premier détermine les structures de données, le second la structure de l'interface.",
+   "why": [
+    [
+     "Pourquoi chaque outil a besoin de son propre état",
+     "La première version rangeait l'état de tous les outils dans un seul objet global : un unique <code>inputs</code>, un unique <code>parameterValues</code>. Résultat : changer d'outil vidait les fichiers déjà choisis, et il était impossible de préparer deux tâches en parallèle. Pire, une tâche longue monopolisait toute l'interface, puisque tous les outils partageaient la même porte d'exécution. Avec <code>ToolSession</code>, chacun des 53 outils tient ses propres entrées, paramètres, presets et dossier de sortie ; changer d'outil ne fait que changer l'objet affiché."
+    ],
+    [
+     "Pourquoi trois catégories plutôt qu'un flux unique",
+     "« Vérification de fichier » n'a besoin ni de dossier de sortie, ni de barre de progression, ni de bouton : on dépose un fichier, le résultat doit apparaître. Mais si on lui impose de force le flux « configurer → cliquer → mettre en file », l'utilisateur doit cliquer avant de voir quoi que ce soit, et on lui demande « où enregistrer ? » alors qu'aucun fichier n'est produit. Ce n'est pas un problème d'implémentation, c'est une abstraction ratée. On classe donc les outils en trois catégories selon qu'ils <b>produisent ou non un fichier</b>, chacune avec son interaction."
+    ],
+    [
+     "Pourquoi aucune dépendance tierce",
+     "Images, documents, hachage et compression passent tous par les frameworks système : ImageIO, CoreGraphics, CoreText, PDFKit, Vision, CryptoKit, Compression. Seuls l'encodage/décodage vidéo, les archives 7z chiffrées et fractionnées, et l'encodage WebP exigent des outils externes. Une couche de dépendance en moins, c'est une catégorie de panne de build en moins."
+    ],
+    [
+     "Pourquoi les paramètres sont décrits en données plutôt qu'en interfaces écrites à la main",
+     "Chaque outil déclare sa liste de paramètres (type, plage, valeur par défaut, condition d'affichage) et l'interface se génère à partir de cette déclaration. Avec 53 outils et 189 paramètres, écrire chaque formulaire à la main obligerait à modifier trois endroits pour ajouter un seul paramètre. Désormais, un nouvel outil se résume à une structure <code>Tool</code>."
+    ]
+   ],
+   "steps": [
+    [
+     "L'application démarre et construit toutes les sessions",
+     "<code>AppState.init</code> parcourt <code>ToolRegistry.all</code> et crée un <code>ToolSession</code> pour chacun des 53 outils. C'est une opération légère en O(53) : on alloue des structures, sans la moindre E/S, donc le démarrage n'en souffre pas."
+    ],
+    [
+     "L'utilisateur dépose des fichiers",
+     "Le dépôt arrive dans la <code>DropZone</code>, se transforme en tableau d'URL et part vers <code>AppState.addInputs</code>. Deux choses s'y passent : filtrer les extensions que l'outil ne prend pas en charge, puis écrire dans la session courante."
+    ],
+    [
+     "Aiguillage : inspection ou conversion",
+     "<code>AppState</code> regarde si <code>selectedTool.inspector</code> existe. S'il existe, on part sur <code>runInspectionIfNeeded()</code> (calcul automatique, affichage en ligne) ; sinon, on attend que l'utilisateur clique. C'est la ligne de partage de toute l'architecture."
+    ],
+    [
+     "Conversion : mise en file et exécution",
+     "Clic sur le bouton → <code>startJob()</code> → résolution du dossier de sortie → <code>JobQueue.enqueue()</code>. La file maintient une liste de tâches à exécuter et un nombre de tâches simultanées borné ; chaque tâche tourne dans un <code>Task.detached</code>, sans occuper le thread principal."
+    ],
+    [
+     "Consolidation des résultats",
+     "À la fin de la tâche, on mesure la taille produite, on calcule le pourcentage d'économie par rapport aux sources, on écrit le journal, puis on renvoie <code>JobState</code> sur le thread principal pour mettre l'interface à jour."
+    ]
+   ],
+   "pitfalls": [
+    [
+     "Les fichiers choisis disparaissaient au changement d'outil",
+     "Tous les outils partageaient un seul <code>inputs</code>, vidé à chaque <code>select()</code>.",
+     "Introduction de <code>ToolSession</code> : chaque outil conserve son état, et changer d'outil ne change que ce qui est affiché."
+    ],
+    [
+     "Impossible de faire autre chose pendant une tâche longue",
+     "Une seule porte d'exécution globale : l'interface restait accaparée par la tâche en cours.",
+     "Les tâches partent dans une file d'arrière-plan et l'interface est découplée de la file ; la barre latérale affiche le nombre de fichiers en attente par outil, ce qui permet de passer de l'un à l'autre."
+    ],
+    [
+     "Les outils d'inspection réclamaient un fichier de sortie après le clic",
+     "<code>JobQueue</code> traitait tout « tableau vide renvoyé » comme un échec, et le réglage de sortie s'appliquait à tous les outils.",
+     "Ajout de <code>ToolResultKind</code> (files / report / inPlace) : les outils de type rapport n'affichent pas les réglages de sortie, n'entrent pas dans la file et affichent leur résultat directement en ligne."
+    ]
+   ],
+   "diagrams": [
+    [
+     "Vue d'ensemble du flux de données",
+     "\n<b>L'utilisateur dépose des fichiers</b>\n      │\n      ▼\n<s>ToolSession</s> ── chaque outil garde ses propres inputs / values / presets\n      │\n      ├──► <i>Inspection</i> ──► FileInspector.inspect()\n      │                        │\n      │                        └──► <i>InspectionReport</i> ──► rendu en ligne\n      │                             <u>pas de bouton · pas de file · pas de sauvegarde</u>\n      │\n      └──► <b>Conversion</b>\n              │\n              ▼\n        AppState.run() ──► résolution du dossier de sortie (alerte si askEveryTime)\n              │\n              ▼\n        <s>JobQueue.enqueue()</s>\n              │\n              ▼\n        Job ──► JobLogger ──► panneau de journal\n              │\n              ▼\n        tool.run(context)\n              │\n              ├──► FFmpeg.execute() ──► ProcessRunner\n              │         │\n              │         ├── stdout: -progress pipe:1 ──► pourcentage\n              │         └── stderr: ──► journal\n              ▼\n        FileIO.commit() ──► gestion des collisions de noms\n              │\n              ▼\n        <i>JobState.finished([URL])</i> ──► statistiques de taille ──► interface"
+    ]
+   ],
+   "reading": [
+    [
+     "App/AppState.swift",
+     "Voir le dictionnaire sessions et select() : comment les sessions sont créées, comment l'inspection et la conversion sont aiguillées"
+    ],
+    [
+     "Core/ToolSession.swift",
+     "Voir init : comment les presets sont appliqués à la construction ; voir addInputs : comment les extensions sont filtrées"
+    ],
+    [
+     "Core/Tool.swift",
+     "Voir la structure Tool : tout ce qu'un outil doit déclarer"
+    ]
+   ]
+  },
+  "pipeline": {
+   "principle": "La difficulté d'un pipeline de tâches n'est pas « appeler un outil en ligne de commande », mais trois choses : <b>concurrence sans emballement</b>, <b>annulation à tout moment</b> et <b>progression remontée en direct dans l'interface</b>. Ces trois exigences expliquent le recours à <code>ProcessHandle</code> et à l'isolation par acteur.",
+   "why": [
+    [
+     "Pourquoi Process plutôt qu'un shell",
+     "Concaténer les arguments en une chaîne confiée à <code>/bin/sh</code> pose des problèmes d'échappement : espaces, guillemets, caractères chinois et parenthèses dans les noms de fichiers peuvent mal tourner. En passant directement un tableau d'arguments à <code>Process</code>, c'est le système qui s'en charge, et on élimine au passage toute injection shell."
+    ],
+    [
+     "Pourquoi un ProcessHandle",
+     "<code>Process</code> ne sait pas s'annuler proprement. Pour interrompre un ffmpeg en cours, il faut détenir sa référence et appeler <code>terminate()</code>. <code>ProcessHandle</code> protège cette référence par un verrou et règle la course où « le processus est annulé avant même d'avoir démarré »."
+    ],
+    [
+     "Pourquoi la progression doit traverser les threads",
+     "La progression de ffmpeg est lue sur un tube, donc sur un thread d'arrière-plan, alors que l'interface doit être mise à jour sur le thread principal. Modifier l'état directement d'un thread à l'autre ferait planter l'app ; <code>ProgressReporter</code> emballe donc le rappel en <code>@Sendable</code> et <code>JobQueue</code> le réachemine vers le MainActor."
+    ],
+    [
+     "Pourquoi le journal est borné",
+     "La sortie ffmpeg d'une vidéo de 2 heures peut compter des centaines de milliers de lignes. <code>JobLogger</code> borne son tampon à 600 entrées (800 pour l'interface) et jette les plus anciennes, pour qu'une tâche longue ne dévore pas toute la mémoire."
+    ]
+   ],
+   "steps": [
+    [
+     "Construire les arguments",
+     "C'est l'implémentation de l'outil qui traduit les paramètres en tableau d'arguments. Cette étape est une fonction pure, sans effet de bord, donc facile à tester."
+    ],
+    [
+     "Lancer le processus",
+     "<code>ProcessRunner.run</code> localise l'exécutable (en privilégiant la version embarquée), prépare les variables d'environnement, branche les tubes stdout/stderr, puis appelle <code>process.run()</code>."
+    ],
+    [
+     "Lecture en flux",
+     "Les tubes sont lus par incréments via <code>readabilityHandler</code>, et <code>LineCollector</code> découpe sur les retours à la ligne en restant thread-safe. Le <code>-progress pipe:1</code> de ffmpeg émet plusieurs lignes <code>key=value</code> par seconde."
+    ],
+    [
+     "Analyser la progression",
+     "On divise <code>out_time_us</code> par la durée totale pour obtenir un pourcentage. Piège classique : dans certains builds le champ s'appelle <code>out_time_ms</code> alors que l'unité reste la microseconde."
+    ],
+    [
+     "Attendre la fin",
+     "<code>withCheckedContinuation</code> fait le pont entre <code>terminationHandler</code> et async, ce qui évite de bloquer un thread."
+    ],
+    [
+     "Valider le résultat",
+     "<code>FileIO.commit</code> choisit le chemin cible selon la stratégie de conflit (renommer / écraser / ignorer), puis remplace le fichier de façon atomique avec <code>moveItem</code>."
+    ]
+   ],
+   "pitfalls": [
+    [
+     "Le processus continuait après l'annulation de la tâche",
+     "Quand <code>ProcessHandle</code> était marqué annulé avant le démarrage du processus, personne ne vérifiait son état ensuite.",
+     "Dans <code>attach()</code>, si l'annulation est déjà demandée, on appelle <code>terminate()</code> immédiatement."
+    ],
+    [
+     "La barre restait à 0 % jusqu'à la fin",
+     "La progression de ffmpeg sort sur stdout, mais au début stderr était branché sur le même sink : l'analyseur lisait du journal au lieu de la progression.",
+     "stdout et stderr sont traités séparément : la progression vient de stdout, le journal de stderr."
+    ],
+    [
+     "Fichiers temporaires laissés derrière",
+     "Les fichiers temporaires écrits en cours de route n'étaient pas nettoyés sur le chemin d'échec.",
+     "Tous les fichiers temporaires sont sécurisés par <code>defer { FileIO.removeQuietly(temp) }</code>."
+    ]
+   ],
+   "diagrams": [
+    [
+     "Le cycle de vie d'une tâche",
+     "\n  enqueue                pump                  detached Task\n     │                     │                         │\n     ▼                     ▼                         ▼\n <s>queued</s> ──► <b>running</b> ──► tool.run(context) ──► FFmpeg.execute()\n     │                     │                         │\n     │                     │        ┌────────────────┴────────────────┐\n     │                     │        ▼                                 ▼\n     │                     │   stdout: out_time_us              stderr: lignes de journal\n     │                     │        │                                 │\n     │                     │        ▼                                 ▼\n     │                     │   ProgressReporter ──► MainActor    JobLogger\n     │                     │        │                                 │\n     │                     │        ▼                                 ▼\n     │                     │   barre / pourcentage                panneau de journal\n     │                     │\n     │                     ▼\n     └──────────► <i>finished / failed / cancelled / reported</i>\n                              │\n                              ▼\n                    statistiques de taille · ratio d'économie · durée"
+    ],
+    [
+     "Pourquoi stdout et stderr doivent rester séparés",
+     "\n   ffmpeg\n     ├── stdout ──► <i>-progress pipe:1</i>  ──► lignes key=value   <u>à analyser</u>\n     └── stderr ──► journal de l'encodeur, avertissements, erreurs    <u>à afficher</u>\n\n   Si les deux partageaient un seul tube :\n     l'analyseur lirait « frame= 120 fps=30 ... »   → échec de l'analyse\n     le panneau de journal serait noyé sous « out_time_us=4000000 »   → du bruit\n\n   Conclusion : <b>deux tubes, deux sinks, chacun son rôle</b>"
+    ]
+   ],
+   "reading": [
+    [
+     "Core/JobQueue.swift",
+     "Voir pump() : comment le plafond de concurrence est régulé ; voir Task.detached : comment l'état revient sur le thread principal"
+    ],
+    [
+     "Core/ProcessRunner.swift",
+     "Voir locate() : pourquoi la version embarquée est privilégiée ; voir run() : comment les tubes sont branchés"
+    ],
+    [
+     "Core/JobLog.swift",
+     "Voir JobLogger : pourquoi la taille est bornée ; voir JobLifecycle : ce qui est consigné au début et à la fin"
+    ]
+   ]
+  },
+  "ffmpeg": {
+   "principle": "Appeler ffmpeg est simple en soi ; la difficulté est <b>la justesse des combinaisons d'arguments</b> — encodeurs, conteneurs, formats de pixels et filtres sont liés par une foule de contraintes implicites. Une mauvaise combinaison provoque soit une erreur, soit un fichier que les autres lecteurs refusent d'ouvrir.",
+   "why": [
+    [
+     "Pourquoi les arguments sont assemblés en trois couches",
+     "Options d'entrée (avant <code>-i</code>), filtres et options de sortie (après <code>-i</code>) ne peuvent pas être mélangés. Construire ces trois couches séparément évite les erreurs d'option mal placée — <code>-hwaccel</code>, par exemple, est une option d'entrée : du côté sortie, ffmpeg échoue immédiatement."
+    ],
+    [
+     "Pourquoi le conteneur doit s'accorder à l'encodeur",
+     "Le conteneur WebM n'accepte que VP8/VP9/AV1, et le MP4 refuse quantité de combinaisons en dehors de VP9. Si l'utilisateur choisit H.264 avec WebM, il faut corriger automatiquement, sinon ffmpeg échoue."
+    ],
+    [
+     "Pourquoi les entrées multiples assemblent elles-mêmes leur -i",
+     "L'enveloppe générique ajoute par défaut un <code>-i input</code>. Les outils comme la concaténation, le filigrane ou le diaporama ont besoin de plusieurs entrées ; si l'enveloppe en ajoute une de plus, tous les index d'entrée se décalent — <code>-map 1:a</code> pointerait sur le mauvais flux. Le bug s'est bel et bien produit : une concaténation n'a produit que 3 secondes au lieu de 6."
+    ],
+    [
+     "Pourquoi le filigrane texte n'utilise pas drawtext",
+     "Le ffmpeg de la machine a été compilé sans libfreetype : le filtre <code>drawtext</code> n'existe pas. On rend donc le texte en PNG transparent avec CoreText, puis on le compose via <code>overlay</code> — avec, en prime, une prise en charge complète des polices CJK et un meilleur anticrénelage."
+    ],
+    [
+     "Pourquoi CRF et encodage matériel sont traités à part",
+     "VideoToolbox ne gère pas le CRF et n'accepte que l'échelle de qualité 0–100 de <code>-q:v</code>. La conversion depuis le CRF reste approximative, c'est pourquoi l'encodage matériel est désactivé par défaut : il va plus vite, mais à qualité égale le fichier est nettement plus gros."
+    ]
+   ],
+   "steps": [
+    [
+     "Choisir l'encodeur",
+     "<code>FFmpeg.videoArgs</code> choisit <code>libx264</code> ou <code>h264_videotoolbox</code> selon l'encodeur et l'activation de l'accélération matérielle."
+    ],
+    [
+     "Assembler les arguments de qualité",
+     "L'encodage logiciel utilise <code>-crf</code> + <code>-preset</code> ; l'encodage matériel utilise <code>-q:v</code>, avec une conversion inverse du CRF vers l'échelle de qualité."
+    ],
+    [
+     "Empiler les filtres géométriques",
+     "Redimensionnement, cadence et mode d'ajustement forment une seule chaîne <code>-vf</code>. Les filtres sont séparés par des virgules, et attention : dans une expression de filtre, la virgule doit être échappée en <code>\\,</code>."
+    ],
+    [
+     "Assembler le côté entrée",
+     "Les outils à entrées multiples fournissent leur propre <code>inputArguments</code> ; les outils à entrée unique utilisent la valeur par défaut <code>[\"-i\", path]</code>."
+    ],
+    [
+     "Exécuter et analyser",
+     "<code>-progress pipe:1</code> fait passer la progression par stdout, séparée du journal (stderr)."
+    ]
+   ],
+   "pitfalls": [
+    [
+     "Après concaténation, la durée n'était que de la moitié",
+     "La fonction auxiliaire ajoutait <code>-i input</code> sans condition, alors que la concaténation utilise <code>-f concat -i list.txt</code> : la liste devenait une seconde entrée, et c'est le fichier de liste lui-même qui était décodé.",
+     "L'outil fournit désormais le préfixe d'entrée complet <code>inputArguments</code>, et la fonction auxiliaire n'ajoute plus rien."
+    ],
+    [
+     "La capture d'écran échouait avec « Requested output format png is not known »",
+     "Le code imposait <code>-f png</code> même pour une sortie image, or PNG est un nom d'encodeur, pas de muxeur.",
+     "<code>formatHint</code> renvoie nil pour les extensions d'image, ce qui laisse ffmpeg choisir tout seul le muxeur image2 d'après l'extension."
+    ],
+    [
+     "Le filigrane échouait avec « No such filter: drawtext »",
+     "Le ffmpeg de la machine n'a pas été compilé avec libfreetype.",
+     "On rend le texte en PNG avec CoreText, puis on le compose via overlay."
+    ],
+    [
+     "La capture matérielle échouait avec « Option hwaccel cannot be applied to output url »",
+     "<code>-hwaccel</code> est une option d'entrée, mais elle avait été placée dans les arguments de sortie.",
+     "On l'a intégrée à <code>inputArguments</code>, avant <code>-i</code>."
+    ]
+   ],
+   "diagrams": [
+    [
+     "L'ordre correct des trois couches d'arguments",
+     "\n  ffmpeg  <u>[options d'entrée]</u>  -i entrée  <s>[filtres]</s>  <b>[options de sortie]</b>  fichier de sortie\n            │                │            │              │\n            │                │            │              └─ -c:v -crf -c:a -movflags\n            │                │            └─ -vf / -filter_complex\n            │                └─ un ou plusieurs -i\n            └─ -hwaccel videotoolbox · -ss · -t\n\n  <i>Au mauvais endroit → ffmpeg échoue aussitôt, et le message désigne souvent le fichier plutôt que l'option</i>"
+    ],
+    [
+     "Les combinaisons conteneur / encodeur valides",
+     "\n            ┌──────────┬───────┬───────┬──────┬──────┬────────┐\n            │          │ H.264 │ H.265 │ VP9  │ AV1  │ ProRes │\n            ├──────────┼───────┼───────┼──────┼──────┼────────┤\n            │ MP4      │  <i>✓</i>   │  <i>✓</i>   │  ✗   │  <i>✓</i>  │   ✗    │\n            │ MOV      │  <i>✓</i>   │  <i>✓</i>   │  ✗   │  ✗   │  <i>✓</i>    │\n            │ MKV      │  <i>✓</i>   │  <i>✓</i>   │  <i>✓</i>  │  <i>✓</i>  │  <i>✓</i>    │\n            │ WebM     │  ✗   │  ✗   │  <i>✓</i>  │  <i>✓</i>  │   ✗    │\n            └──────────┴───────┴───────┴──────┴──────┴────────┘\n            <u>Quand l'utilisateur choisit une combinaison illégale, on la corrige au lieu de la laisser échouer</u>"
+    ]
+   ],
+   "reading": [
+    [
+     "Core/FFmpeg.swift",
+     "Voir videoArgs : les deux branches logiciel / matériel ; voir progressHandler : comment la progression est analysée"
+    ],
+    [
+     "Features/Video/VideoSupport.swift",
+     "Voir encode : pourquoi le paramètre inputArguments existe"
+    ]
+   ]
+  },
+  "gif": {
+   "principle": "L'ImageIO de macOS <b>sait lire le GIF mais pas l'écrire</b> : toute la sortie GIF est donc maison — quantification des couleurs → mapping d'index → compression LZW → composition des images. C'est la partie du projet qui ressemble le plus à « implémenter un format de fichier depuis zéro ».",
+   "why": [
+    [
+     "Pourquoi la quantification des couleurs est nécessaire",
+     "Une image GIF compte au plus 256 couleurs, quand une photo en aligne des dizaines de milliers. Il faut donc ramener les couleurs à une palette. D'où le median cut : on met toutes les couleurs dans une boîte, on coupe la boîte au niveau de la médiane le long de l'axe le plus long, et on répète jusqu'à obtenir autant de boîtes que de couleurs voulues. La moyenne pondérée de chaque boîte fournit une entrée de la palette."
+    ],
+    [
+     "Pourquoi un histogramme 15 bits plutôt que du RGB complet",
+     "L'espace complet sur 24 bits compte 16 millions de possibilités : le tableau d'histogramme pèserait 64 Mo. En tronquant chaque canal à 5 bits (32 niveaux), on obtient 32768 seaux pour seulement 128 Ko, sans différence perceptible à l'œil."
+    ],
+    [
+     "Pourquoi une table de correspondance",
+     "Chaque image compte des dizaines à des centaines de milliers de pixels, et chacun doit trouver la couleur de palette la plus proche. En parcourant les 256 entrées de la palette pour chaque pixel, une seule image de 480×270 demanderait 33 millions de calculs de distance. On précalcule donc une table de 32768 entrées (couleur 15 bits → index de palette) : ensuite, chaque pixel ne coûte qu'un accès tableau."
+    ],
+    [
+     "Pourquoi écrire LZW soi-même",
+     "Le GIF utilise un LZW à longueur de code variable, sans rapport avec le deflate du zip. Le système n'en fournit aucune implémentation, et il faut piloter précisément la croissance de la longueur de code et le moment de réinitialiser le dictionnaire."
+    ],
+    [
+     "Pourquoi les transitions se composent pixel par pixel",
+     "Le xfade de ffmpeg ne traite que des flux vidéo, alors que la conversion de plusieurs images en GIF demande de régler la durée et la transition image par image. Manipuler directement un tampon RGBA est plus souple : un fondu est une interpolation linéaire, un glissement un décalage de coordonnées, un balayage un test colonne par colonne, une ouverture circulaire un test de rayon."
+    ]
+   ],
+   "steps": [
+    [
+     "Décodage et normalisation du canevas",
+     "Chaque image est rendue dans un canevas RGBA de taille unique selon son mode d'ajustement (affichage complet / remplissage par recadrage / étirement). La taille découle du rapport de la première image."
+    ],
+    [
+     "Construire les images de transition",
+     "On insère plusieurs images de transition entre deux images voisines. Le fondu vaut <code>a·(1-t) + b·t</code> ; le glissement prend le pixel source selon la coordonnée x ; l'ouverture circulaire compare la distance au centre."
+    ],
+    [
+     "Palette globale",
+     "On échantillonne régulièrement environ 220 000 pixels sur l'ensemble des images, on effectue un seul median cut, et on obtient une palette commune à toute l'animation — bien plus compacte qu'une palette par image."
+    ],
+    [
+     "Mapping d'index",
+     "La table de correspondance convertit chaque pixel en index de palette, avec un tramage Bayer optionnel pour casser les bandes de couleur."
+    ],
+    [
+     "Encodage LZW",
+     "Selon les règles du GIF : on émet d'abord le code de nettoyage, puis on étend le préfixe pixel par pixel ; la longueur de code augmente quand le dictionnaire atteint 2^n, et le dictionnaire est réinitialisé à 4096."
+    ],
+    [
+     "Écrire la structure 89a",
+     "En-tête → descripteur d'écran logique → palette globale → extension de bouclage Netscape → chaque image (extension de contrôle graphique + descripteur d'image + blocs de données LZW) → terminateur."
+    ]
+   ],
+   "pitfalls": [
+    [
+     "Des bandes de couleur bien visibles après quantification",
+     "Prendre simplement la couleur la plus proche crée des bandes dans les dégradés.",
+     "Ajout d'un tramage ordonné de Bayer : avant la recherche dans la table, on ajoute à chaque canal un léger décalage tiré d'une matrice 4×4, si bien que des pixels voisins tombent sur des entrées de palette différentes — l'œil les fond en une transition douce."
+    ],
+    [
+     "Palette aux couleurs faussées",
+     "Au départ on faisait une simple moyenne des couleurs du seau, en ignorant leur fréquence : une couleur rare pesait autant qu'une couleur fréquente.",
+     "Passage à une moyenne pondérée par les compteurs de l'histogramme."
+    ],
+    [
+     "La quantification des grandes images était lente",
+     "256 calculs de distance pour chaque pixel.",
+     "Précalcul d'une table de 32768 entrées, qui ramène le coût par pixel à un simple accès tableau."
+    ]
+   ],
+   "diagrams": [
+    [
+     "Chaîne d'encodage GIF",
+     "\n  <b>Images d'entrée</b> (tailles variées)\n        │\n        ▼\n  <s>Normalisation du canevas</s>  scale / crop / pad → RGBA homogène\n        │\n        ▼\n  <s>Composition des transitions</s>  fondu · glissement · balayage · ouverture circulaire\n        │\n        ▼\n  <s>Échantillonnage + median cut</s>  → palette globale (≤256 couleurs)\n        │\n        ▼\n  <s>Table de correspondance</s>  32768 entrées : couleur 15 bits → index de palette\n        │\n        ▼\n  <s>Mapping d'index + tramage Bayer</s>  → un tableau d'octets par image\n        │\n        ▼\n  <s>LZW</s>  longueur de code variable 9→12 bits, dictionnaire réinitialisé à 4096\n        │\n        ▼\n  <b>GIF89a</b>  en-tête · palette · extension de boucle · données par image"
+    ],
+    [
+     "Median cut : d'une boîte on en fait deux",
+     "\n  Départ : toutes les couleurs dans une seule boîte\n  ┌─────────────────────────────┐\n  │  plage R 12 ─────────── 240 │\n  │  plage G  8 ─────────── 201 │   on cherche l'axe le plus long (R ici)\n  │  plage B 30 ─────────── 190 │\n  └─────────────────────────────┘\n                │\n                │  découpe le long de R à la <b>médiane pondérée</b>\n                ▼\n  ┌──────────────┐   ┌──────────────┐\n  │ R 12 ── 120  │   │ R 121 ── 240 │\n  │ moyenne pondérée │   │ moyenne pondérée │\n  └──────────────┘   └──────────────┘\n        │                    │\n        └──────── on répète jusqu'à ce que le nombre de boîtes = le nombre de couleurs voulu ────────┘\n\n  <u>Médiane pondérée plutôt que point milieu : les deux moitiés gardent des nombres de pixels proches</u>"
+    ]
+   ],
+   "reading": [
+    [
+     "Codecs/GifEncoder.swift",
+     "Voir ColorQuantizer.quantize : le median cut ; voir LzwEncoder.encode : la croissance de la longueur de code"
+    ],
+    [
+     "Features/Image/GifBuilder.swift",
+     "Voir run : tout le trajet, du décodage à l'écriture du fichier"
+    ]
+   ]
+  },
+  "markdown": {
+   "principle": "Plutôt que de dépendre de pandoc, la conversion bidirectionnelle entre Markdown et texte enrichi est écrite maison. L'analyse dans le sens aller est relativement simple ; <b>c'est la conversion inverse qui est délicate</b> — il faut remonter des caractéristiques de police jusqu'à la syntaxe Markdown.",
+   "why": [
+    [
+     "Pourquoi l'analyseur Markdown est écrit à la main",
+     "Markdown n'a pas de spécification unique, mais la syntaxe réellement utilisée reste réduite : titres, listes, emphase, code, liens, citations, tableaux. Un analyseur écrit à la main tient en 400 lignes, bien plus léger que d'embarquer pandoc (un binaire Haskell de plusieurs dizaines de Mo), et il donne un contrôle précis sur le style produit."
+    ],
+    [
+     "Pourquoi la conversion inverse s'appuie sur les caractéristiques de police",
+     "Ce qu'on lit depuis Word, c'est un <code>NSAttributedString</code> : aucune marque « ceci est un titre », seulement des informations de police. D'où les règles : une taille nettement supérieure au corps du texte → un titre ; les traits gras et italique à la fois → <code>***texte***</code> ; une police à chasse fixe → du code entre accents graves."
+    ],
+    [
+     "Pourquoi il faut traiter les textLists d'un paragraphe",
+     "Dans le texte enrichi, une liste ne s'exprime pas par un préfixe textuel : elle vit dans les <code>textLists</code> d'un <code>NSParagraphStyle</code>. Sans lire cette propriété, aucune liste n'est jamais détectée."
+    ],
+    [
+     "Pourquoi l'analyse en ligne se fait en un seul passage",
+     "Enchaîner plusieurs remplacements par expression régulière les fait interférer : après avoir balisé le gras, la regex de l'italique peut mordre sur les astérisques qu'on vient d'insérer. Un seul balayage de gauche à droite, qui cherche la marque fermante dès qu'il rencontre une marque ouvrante, ne traite jamais deux fois le même texte."
+    ]
+   ],
+   "steps": [
+    [
+     "Classer chaque ligne",
+     "On examine les lignes une à une : ligne vide, bloc de code, titre, citation, liste à puces, liste numérotée, tableau ou paragraphe ordinaire."
+    ],
+    [
+     "Traiter les blocs de code",
+     "Sur <code>```</code>, on passe en mode code, on met toutes les lignes en tampon jusqu'au bloc suivant, puis on émet l'ensemble en chasse fixe sur fond gris."
+    ],
+    [
+     "Analyser le balisage en ligne",
+     "<code>inline()</code> repère les accents graves, astérisques, soulignés, liens et images, et produit les attributs correspondants."
+    ],
+    [
+     "Fusionner les paragraphes",
+     "Les lignes ordinaires consécutives sont réunies en un paragraphe par des espaces — en Markdown, un paragraphe peut couvrir plusieurs lignes, et une sortie ligne par ligne donne une mise en page en morceaux."
+    ],
+    [
+     "Sens inverse : parcourir les segments d'attributs",
+     "<code>attributes(at:effectiveRange:)</code> découpe le texte aux frontières où les attributs changent, puis chaque segment décide seul de la syntaxe Markdown à employer."
+    ]
+   ],
+   "pitfalls": [
+    [
+     "Le Markdown exporté depuis Word ressortait en texte brut",
+     "On ne regardait que les traits gras/italique, sans lire la taille de police : les titres passaient inaperçus.",
+     "Ajout de seuils de taille : ≥24pt donne <code>#</code>, ≥20pt donne <code>##</code>, et ainsi de suite."
+    ],
+    [
+     "Les listes devenaient des paragraphes ordinaires",
+     "On ne lisait pas <code>NSParagraphStyle.textLists</code>.",
+     "On examine le <code>markerFormat</code> de <code>style.textLists.first</code> pour émettre <code>-</code> ou <code>1.</code>."
+    ],
+    [
+     "Le style du texte après un code en ligne partait en vrille",
+     "Les remplacements par expression régulière à répétition imbriquaient les marques les unes dans les autres.",
+     "Passage à un balayage en un seul passage."
+    ]
+   ],
+   "diagrams": [
+    [
+     "Les deux sens de la conversion",
+     "\n  <b>Markdown → texte enrichi</b> (sens aller, plus facile)\n\n    # Titre          ──►  20pt gras\n    **gras**         ──►  trait bold\n    - Élément        ──►  • + style de paragraphe indenté\n    `code`           ──►  chasse fixe + fond gris\n    [texte](url)     ──►  soulignement bleu + attribut link\n\n  <b>texte enrichi → Markdown</b> (sens inverse, plus difficile)\n\n    20pt gras        ──►  # Titre          <u>déduit de la taille de police</u>\n    trait bold       ──►  **texte**\n    trait italic     ──►  *texte*\n    chasse fixe      ──►  `texte`\n    attribut link    ──►  [texte](url)\n    textLists        ──►  - Élément        <u>déduit du style de paragraphe</u>"
+    ]
+   ],
+   "reading": [
+    [
+     "Features/Document/MarkdownConverter.swift",
+     "Voir attributed(from:) pour le sens aller et markdown(from:) pour le sens inverse"
+    ]
+   ]
+  },
+  "hash": {
+   "principle": "Lire le fichier une seule fois et l'envoyer aux cinq hacheurs en parallèle. Ce n'est pas une micro-optimisation : sur un fichier de 4 Go, cinq lectures représentent quatre fois plus d'E/S disque.",
+   "why": [
+    [
+     "Pourquoi tout calculer en une seule passe",
+     "Un disque mécanique lit en séquentiel à environ 150 Mo/s, un SSD à environ 500 Mo/s. Un fichier de 4 Go se lit donc en 8 à 27 secondes. Si l'utilisateur veut voir à la fois le MD5 et le SHA-256, les calculer séparément impose deux lectures. Puisqu'il faut lire de toute façon, autant tout envoyer aux hacheurs d'un coup."
+    ],
+    [
+     "Pourquoi CryptoKit mais un CRC32 écrit à la main",
+     "CryptoKit fournit des interfaces en flux pour MD5, SHA-1, SHA-256 et SHA-512 ; elles sont accélérées par le matériel et auditées. Mais le CRC32 est une somme de contrôle, pas un hachage cryptographique : CryptoKit ne le propose pas, on l'implémente donc par table de correspondance — 256 entrées, une consultation et un XOR par octet."
+    ],
+    [
+     "Pourquoi lire par blocs",
+     "Un <code>Data(contentsOf:)</code> d'un seul coup charge tout le fichier en mémoire : 1 Go de fichier, 1 Go de RAM. Le traitement en flux par blocs de 1 Mo maintient une empreinte constante."
+    ],
+    [
+     "Pourquoi FileHandle plutôt que mmap",
+     "Le mappage mémoire est plus efficace sur de très gros fichiers, mais il épingle le fichier dans la mémoire virtuelle et se comporte de façon irrégulière sur les volumes réseau et les disques externes. La lecture en flux est plus prévisible."
+    ]
+   ],
+   "steps": [
+    [
+     "Ouvrir le fichier et récupérer sa taille",
+     "La taille totale sert à calculer le pourcentage de progression."
+    ],
+    [
+     "Boucler sur des blocs de 1 Mo",
+     "À chaque bloc lu, on appelle <code>update(data:)</code> sur chaque hacheur à tour de rôle. Les algorithmes non activés ont une variable nil, que le chaînage optionnel permet d'ignorer."
+    ],
+    [
+     "Finaliser",
+     "<code>finalize()</code> fournit le condensat, qu'on convertit en chaîne hexadécimale."
+    ],
+    [
+     "Comparaison (facultative)",
+     "Si l'utilisateur a saisi une valeur attendue, on la compare au résultat de l'algorithme choisi, sans tenir compte de la casse."
+    ]
+   ],
+   "pitfalls": [
+    [
+     "Les résultats CRC32 ne correspondaient pas aux outils système",
+     "Le CRC32 existe en plusieurs variantes, qui diffèrent par la valeur initiale, le polynôme et l'inversion finale. Le GIF en utilise une autre.",
+     "Adoption de la norme IEEE 802.3 : valeur initiale <code>0xFFFFFFFF</code>, polynôme <code>0xEDB88320</code> et résultat inversé, ce qui correspond à <code>zlib.crc32</code>."
+    ]
+   ],
+   "diagrams": [
+    [
+     "Une seule lecture, cinq hacheurs",
+     "\n                 ┌──────────────────────────────────────┐\n                 │         Fichier (blocs de 1 Mo)      │\n                 └──────────────────────────────────────┘\n                                  │\n              ┌───────────┬───────┴───────┬───────────┐\n              ▼           ▼               ▼           ▼\n         <s>Insecure.MD5</s> <s>Insecure.SHA1</s> <s>SHA256</s> <s>SHA512</s>   <i>CRC32</i>\n              │           │               │           │        │\n              └───────────┴───────┬───────┴───────────┘        │\n                                  ▼                            ▼\n                            finalize()                table + XOR\n                                  │                            │\n                                  └──────────┬─────────────────┘\n                                             ▼\n                              MD5 · SHA-1 · SHA-256 · SHA-512 · CRC32\n\n          <b>E/S disque : 1 lecture</b>  au lieu de 5"
+    ]
+   ],
+   "reading": [
+    [
+     "Core/HashEngine.swift",
+     "Voir hash(_:algorithms:) : la boucle unique qui alimente tous les hacheurs ; voir la table CRC32"
+    ]
+   ]
+  },
+  "inspect": {
+   "principle": "Les outils d'inspection n'ont <b>pas de bouton</b>. On dépose un fichier, le résultat se calcule et s'affiche en ligne ; on change une option, il est recalculé aussitôt. C'est l'application directe de « des fonctions de nature différente, des interactions différentes ».",
+   "why": [
+    [
+     "Pourquoi aucun bouton n'est nécessaire",
+     "Calculer une somme de contrôle ou lire les métadonnées d'une image sont des opérations <b>purement fonctionnelles</b> : à entrée donnée, un résultat déterminé tombe immédiatement, sans effet de bord. Faire cliquer l'utilisateur avant d'attendre un résultat n'apporte rien."
+    ],
+    [
+     "Pourquoi un modèle de rapport dédié",
+     "En fourrant les résultats dans le panneau de journal, il faudrait basculer sur l'onglet « Journal » pour les voir, et ils seraient en texte brut. Avec <code>InspectionReport</code>, les résultats se regroupent, portent un état et chaque ligne peut recevoir un bouton de copie."
+    ],
+    [
+     "Pourquoi la détection du type d'image n'interroge pas ffprobe",
+     "ffprobe présente un JPEG comme un <b>flux vidéo</b> <code>mjpeg</code> d'une seule image. En se contentant de demander « y a-t-il un flux vidéo ? », une image s'afficherait avec « durée 0 seconde, 0 fps, débit 0 » — que des champs dénués de sens. On classe donc d'abord par extension, et on ne retombe sur l'examen des flux que lorsque le conteneur est ambigu (un .mkv, par exemple)."
+    ],
+    [
+     "Pourquoi un anti-rebond est nécessaire",
+     "Déposer un fichier déclenche un calcul, changer un paramètre aussi. En manipulant plusieurs fois de suite l'interrupteur « extraire les couleurs dominantes », on lance plusieurs tâches concurrentes. On compare donc des instantanés d'entrée pour jeter les résultats périmés : à la fin d'un calcul, on vérifie que les entrées sont toujours celles du départ, sinon on abandonne."
+    ]
+   ],
+   "steps": [
+    [
+     "Un changement d'entrée déclenche le calcul",
+     "<code>addInputs</code>, <code>removeInput</code> et <code>parametersChanged</code> appellent tous <code>runInspectionIfNeeded()</code>."
+    ],
+    [
+     "Marquer le calcul comme en cours",
+     "On passe <code>isInspecting = true</code> et l'interface affiche un indicateur de progression."
+    ],
+    [
+     "Calculer en arrière-plan",
+     "On appelle <code>inspector.inspect(...)</code> dans une <code>Task</code>, sans bloquer le thread principal."
+    ],
+    [
+     "Contrôle de péremption",
+     "De retour sur le thread principal, on compare les instantanés d'entrée et on jette le résultat s'ils diffèrent, pour qu'un ancien résultat n'écrase pas le nouveau."
+    ],
+    [
+     "Rendu",
+     "<code>InspectionReportView</code> effectue le rendu par groupe : les lignes à valeur en chasse fixe reçoivent un bouton de copie, celles qui portent un état affichent ✓ / ✗."
+    ]
+   ],
+   "pitfalls": [
+    [
+     "Les images affichaient durée, cadence et débit",
+     "<code>hasVideo</code> se contentait de tester <code>videoCodec != nil</code>, et ffprobe traite un JPEG comme un flux vidéo.",
+     "Introduction de <code>MediaKind</code> pour classer par extension, plus <code>hasTimeline</code> pour décider si les champs de durée s'affichent."
+    ],
+    [
+     "Déposer un fichier ne produisait aucun résultat",
+     "On ne calculait que l'estimation, sans déclencher l'inspecteur.",
+     "On appelle <code>runInspectionIfNeeded()</code> sur tous les chemins qui modifient les entrées ou les paramètres."
+    ]
+   ],
+   "diagrams": [
+    [
+     "La séparation entre inspection et conversion",
+     "\n   Fichier déposé\n       │\n       ▼\n   selectedTool.inspector existe ?\n       │\n       ├── <i>oui</i> ──► runInspectionIfNeeded()\n       │                  │\n       │                  ├─ isInspecting = true\n       │                  ├─ inspect() en arrière-plan\n       │                  ├─ comparaison des instantanés d'entrée (résultats périmés jetés)\n       │                  └─ <b>InspectionReport</b> ──► rendu en ligne\n       │\n       └── <u>non</u> ──► on attend le clic de l'utilisateur\n                          │\n                          ▼\n                     JobQueue (flux de conversion)"
+    ]
+   ],
+   "reading": [
+    [
+     "Core/Inspection.swift",
+     "Voir InspectionReport : pourquoi un modèle structuré plutôt qu'une chaîne"
+    ],
+    [
+     "Features/Inspect/ImageInspector.swift",
+     "Voir inspect() : comment les métadonnées sont collectées par couches"
+    ],
+    [
+     "App/AppState.swift",
+     "Voir runInspectionIfNeeded() : comment les résultats périmés sont écartés"
+    ]
+   ]
+  },
+  "image": {
+   "principle": "Redimensionnement, recadrage, rotation, coins arrondis, filigranes et assemblage passent tous par CoreGraphics. Le point clé : <b>toutes les opérations géométriques se font dans un CGContext</b>, plutôt qu'en produisant des fichiers intermédiaires qu'on retraiterait ensuite.",
+   "why": [
+    [
+     "Pourquoi CoreGraphics plutôt qu'ImageMagick",
+     "CoreGraphics est un framework système : rien à installer, aucune communication entre processus, et il sait exploiter le GPU et le SIMD. ImageMagick ajoute une dépendance et, en traitement par lots, impose de relancer un processus à chaque image."
+    ],
+    [
+     "Pourquoi il faut traiter l'orientation EXIF",
+     "Les pixels d'une photo prise au téléphone sont stockés en travers ; c'est la balise orientation de l'EXIF qui indique au lecteur comment tourner. En lisant les pixels tels quels, on obtient une image couchée. <code>loadOriented</code> lit donc d'abord la balise d'orientation, puis décide s'il faut pré-tourner."
+    ],
+    [
+     "Pourquoi premultipliedLast",
+     "Le <code>premultipliedLast</code> de CoreGraphics désigne du RGBA dont les canaux de couleur sont déjà multipliés par l'alpha. C'est le format le plus naturel pour dessiner une image dans un CGContext ; avec d'autres, les bords translucides se liserent de noir ou de blanc."
+    ],
+    [
+     "Pourquoi la taille du filigrane s'exprime en pourcentage de la largeur",
+     "Une taille fixe rend très différemment selon les dimensions : 24pt convient sur une image de 800px de large, mais devient invisible sur une photo de 4000px. En la calculant en pourcentage de la largeur, la proportion visuelle reste constante d'un lot à l'autre."
+    ],
+    [
+     "Pourquoi l'assemblage commence par uniformiser les cellules",
+     "Assembler directement des images de tailles différentes donne un résultat en dents de scie. On calcule d'abord une taille de cellule uniforme, on met chaque image à l'échelle en contain et on la centre, puis on dessine sur la grille."
+    ]
+   ],
+   "steps": [
+    [
+     "Décoder et corriger l'orientation",
+     "<code>loadOriented</code> lit l'orientation EXIF et appelle <code>transform</code> pour pré-tourner si nécessaire."
+    ],
+    [
+     "Calculer le rectangle cible selon le mode d'ajustement",
+     "<code>resize</code> gère quatre modes : stretch étire directement ; contain/pad met à l'échelle en gardant les proportions et centre (pad remplit le fond) ; cover agrandit jusqu'à couvrir, puis recadre."
+    ],
+    [
+     "Dessiner dans un nouveau canevas",
+     "On crée un <code>CGContext</code> aux dimensions cibles, on règle <code>interpolationQuality = .high</code>, puis on dessine."
+    ],
+    [
+     "Encoder et écrire",
+     "ImageIO prend en charge PNG/JPEG/HEIC/TIFF et compagnie ; le WebP part vers le cwebp embarqué ; les formats non pris en charge retombent sur un repli."
+    ]
+   ],
+   "pitfalls": [
+    [
+     "La sortie WebP était un fichier corrompu",
+     "L'ImageIO de macOS ne sait pas écrire de WebP. On a d'abord tenté d'écrire notre propre encodeur VP8L, mais <code>dwebp</code> rejetait le flux produit avec BITSTREAM_ERROR.",
+     "Passage à cwebp (l'encodeur officiel WebP), embarqué dans l'application avec ses 8 bibliothèques dynamiques."
+    ],
+    [
+     "Les images translucides se lisaient de noir après composition",
+     "On utilisait un format de bitmap à alpha non prémultiplié.",
+     "Utilisation systématique de <code>premultipliedLast</code>."
+    ],
+    [
+     "Les photos en portrait ressortaient en paysage",
+     "L'orientation EXIF n'était pas lue.",
+     "Tous les points d'entrée passent par <code>loadOriented</code>."
+    ]
+   ],
+   "diagrams": [
+    [
+     "Les quatre modes d'ajustement",
+     "\n  Source 640×360  →  cible 480×480\n\n  <b>contain / pad</b> (proportions gardées, bords ajoutés)   <b>cover</b> (proportions gardées, recadrage)\n  ┌──────────────────┐              ┌──────────────────┐\n  │░░░░░░░░░░░░░░░░░░│              │██████████████████│\n  │░░┌────────────┐░░│              │██████████████████│\n  │░░│  complète  │░░│              │███ recadrage ████│\n  │░░└────────────┘░░│              │██████████████████│\n  │░░░░░░░░░░░░░░░░░░│              │██████████████████│\n  └──────────────────┘              └──────────────────┘\n        480×480                          480×480\n    image réelle 480×270             image réelle = cible\n\n  <b>stretch</b> (étirement, déformation)\n  ┌──────────────────┐\n  │██████████████████│   image écrasée\n  │██████████████████│   proportions faussées\n  └──────────────────┘\n\n  <u>Quand la cible dépasse la source et que « autoriser l'agrandissement » est désactivé, la taille est bornée à celle de la source</u>"
+    ]
+   ],
+   "reading": [
+    [
+     "Features/Image/ImageSupport.swift",
+     "Voir resize pour les quatre modes d'ajustement, et watermark pour le calcul des coordonnées"
+    ]
+   ]
+  },
+  "estimate": {
+   "principle": "Le modèle d'estimation repose sur deux éléments : <b>une valeur empirique de bits par pixel propre à l'encodeur</b>, et <b>le débit mesuré sur la machine</b>. Chaque résultat est présenté comme une estimation, avec la façon dont il a été obtenu.",
+   "why": [
+    [
+     "Pourquoi des bits par pixel plutôt qu'une table de correspondance",
+     "La taille d'une vidéo dépend du nombre de pixels × de la cadence × du nombre de bits par pixel, ce dernier étant fixé par l'encodeur et le CRF. Avec ce modèle, n'importe quelle résolution et n'importe quelle cadence se déduisent, sans avoir à tout tester de façon exhaustive."
+    ],
+    [
+     "Pourquoi le CRF suit une correspondance exponentielle",
+     "Le CRF et le débit sont à peu près liés de façon exponentielle : chaque baisse de 6 points du CRF double le débit. D'où la conversion <code>2^((CRF de référence - CRF réel) / 6)</code>, bien plus juste qu'une approximation linéaire."
+    ],
+    [
+     "Pourquoi le temps distingue encodage logiciel et matériel",
+     "VideoToolbox s'appuie sur un bloc matériel dédié et va environ 5 fois plus vite que l'encodage logiciel. Sans cette distinction, activer l'accélération matérielle ferait fortement surestimer la durée annoncée."
+    ],
+    [
+     "Pourquoi l'estimation annonce sa base de calcul",
+     "Une estimation comporte toujours une marge d'erreur. Plutôt que de lâcher un chiffre sans explication, on indique à l'utilisateur « ceci est estimé d'après l'encodeur, le CRF et la résolution », ce qui lui permet de juger de sa fiabilité."
+    ],
+    [
+     "Pourquoi les outils de type rapport n'ont pas d'estimation",
+     "« Calculer la somme de contrôle » ne produit aucun fichier : il n'y a pas de taille de sortie dont parler. Afficher « sortie estimée 1,5 Mo » serait trompeur, donc la carte d'estimation disparaît purement et simplement."
+    ]
+   ],
+   "steps": [
+    [
+     "Lire les informations du média",
+     "<code>MediaProbe</code> fournit la durée, la résolution, la cadence et les paramètres audio."
+    ],
+    [
+     "Calculer le débit vidéo",
+     "Nombre de pixels × cadence × bits par pixel. En mode taille cible ou débit imposé, la valeur fournie est reprise telle quelle."
+    ],
+    [
+     "Ajouter le débit audio",
+     "AAC/MP3 utilise le débit choisi ; les formats sans perte sont estimés d'après fréquence d'échantillonnage × canaux × profondeur de bits ; la copie de flux conserve le débit d'origine."
+    ],
+    [
+     "Convertir en taille",
+     "Débit total ÷ 8 × durée, plus 3 % de surcoût de conteneur."
+    ],
+    [
+     "Estimer la durée de calcul",
+     "Nombre total d'images ÷ débit de la machine (normalisé selon la résolution, puis multiplié par les facteurs de preset et de matériel)."
+    ]
+   ],
+   "pitfalls": [
+    [
+     "Des estimations trop éloignées de la réalité",
+     "La première version appliquait le même nombre de bits par pixel à tous les encodeurs, ce qui surestimait le HEVC de 40 %.",
+     "On étalonne une valeur de référence pour chaque encodeur."
+    ],
+    [
+     "L'estimation en compression à taille cible était fausse",
+     "On passait quand même par le modèle de débit, alors que le mode taille cible fixe le résultat par définition.",
+     "On détecte ce mode, on reprend directement la valeur cible et on la marque comme exacte plutôt qu'estimée."
+    ]
+   ],
+   "diagrams": [
+    [
+     "Formules d'estimation de taille",
+     "\n  Débit vidéo = largeur × hauteur × cadence × <b>bits par pixel</b>\n                                      │\n                    ┌─────────────────┴─────────────────┐\n                    ▼                                   ▼\n              <i>référence encodeur</i>                 <i>facteur CRF</i>\n              H.264  0.085                     2 ^ ((23 − CRF) / 6)\n              HEVC   0.060                     CRF −6 → débit doublé\n              VP9    0.055\n              AV1    0.045                     <u>facteur preset</u>\n              ProRes 3.2                       ultrafast 1.35 → slower 0.88\n\n  Débit audio = AAC/MP3 selon la valeur choisie · sans perte estimé d'après la fréquence d'échantillonnage · copie de flux conserve la valeur d'origine\n\n  Taille totale = (débit vidéo + débit audio) ÷ 8 × durée × 1.03\n                                                         └─ surcoût du conteneur\n\n  Durée   = nombre total d'images ÷ (débit machine × facteur de résolution × facteur de preset × facteur matériel)"
+    ]
+   ],
+   "reading": [
+    [
+     "Core/Estimator.swift",
+     "Voir bitsPerPixel : pourquoi la correspondance est exponentielle ; voir encodeSeconds : comment le débit est étalonné"
+    ],
+    [
+     "Core/EstimateEngine.swift",
+     "Voir compute : la répartition par outil ; voir le retour anticipé pour les outils de type rapport"
+    ]
+   ]
+  },
+  "design": {
+   "principle": "Tout s'appuie sur les <b>couleurs sémantiques</b> de macOS et sur des contrôles natifs. On obtient ainsi gratuitement l'adaptation clair/sombre, le contraste renforcé et la couleur d'accentuation choisie par l'utilisateur.",
+   "why": [
+    [
+     "Pourquoi pas de RGB figé",
+     "La première version utilisait un jeu de valeurs sombres codées en dur, ce qui imposait le mode sombre, jurait sur un système clair et ignorait la couleur d'accentuation de l'utilisateur. Passer à <code>labelColor</code>, <code>separatorColor</code> et <code>controlBackgroundColor</code> a confié toute l'adaptation au système."
+    ],
+    [
+     "Pourquoi les contrôles sont natifs",
+     "Les <code>Slider</code>, <code>Toggle(.switch)</code> et <code>Picker(.segmented)</code> de SwiftUI reposent sur des contrôles AppKit : apparence, animations et interactions clavier sont celles du système. Des contrôles dessinés à la main y parviennent rarement."
+    ],
+    [
+     "Pourquoi une échelle d'espacements unique",
+     "Des valeurs choisies au hasard, 7, 13 ou 19, donnent une interface brouillonne. Avec une échelle 4/8/12/16/20/24/32, tous les espacements sont des multiples de 4 et le rythme visuel s'unifie de lui-même."
+    ],
+    [
+     "Pourquoi les couleurs de catégorie sont désaturées",
+     "Les 53 outils se répartissent en 5 catégories. Avec des couleurs saturées, la barre latérale entière virerait à l'arc-en-ciel. On se contente donc d'une couleur système désaturée sur l'icône, comme repère, sans jamais en faire un grand aplat de fond."
+    ]
+   ],
+   "steps": [
+    [
+     "Définir les couleurs sémantiques",
+     "<code>Palette</code> associe les couleurs système à des noms porteurs de sens ; le code d'interface ne cite que le nom sémantique."
+    ],
+    [
+     "Définir les échelles de typographie et d'espacement",
+     "<code>Type</code> et <code>Metrics</code> fournissent les constantes nommées."
+    ],
+    [
+     "Construire les composants",
+     "<code>Section</code>, <code>PrimaryButton</code>, <code>DropZone</code>, <code>FileListView</code>, etc."
+    ],
+    [
+     "Le formulaire de paramètres se génère seul",
+     "<code>ParameterForm</code> choisit le type de contrôle d'après la déclaration du paramètre : un contrôle segmenté pour quelques options courtes, un menu déroulant pour beaucoup d'options longues, et un interrupteur natif pour les booléens."
+    ]
+   ],
+   "pitfalls": [
+    [
+     "Le texte devenait illisible après un changement clair/sombre",
+     "Le texte utilisait un blanc ou un noir figé.",
+     "Passage à la famille de couleurs sémantiques <code>labelColor</code>."
+    ],
+    [
+     "Le libellé du bouton ne correspondait pas à l'action",
+     "Tous les outils partageaient un unique « Lancer la conversion ».",
+     "Chaque outil déclare son propre verbe, avec bascule selon le mode (générer/identifier, chiffrer/déchiffrer, aperçu/exécuter)."
+    ]
+   ],
+   "diagrams": [
+    [
+     "Comment une déclaration de paramètre devient une interface",
+     "\n  <b>Tool.parameters</b> (données)\n        │\n        ├─ .text(\"expected\", \"Comparaison de somme de contrôle\")   ──► <u>LabeledTextField</u>\n        ├─ .slider(\"crf\", \"Qualité\", 0…51)                     ──► <u>SliderInput</u>\n        ├─ .toggle(\"hardware\", \"Accélération matérielle\")       ──► <u>SwitchToggle</u>\n        ├─ .picker(4 options courtes)                          ──► <u>SegmentPicker</u>\n        └─ .picker(8 options longues)                          ──► <u>PopUpPicker</u>\n                  │\n                  ▼\n        <b>ParameterForm</b> parcourt la liste et effectue le rendu\n                  │\n                  ▼\n        seuls les paramètres dont visibleWhen est vrai s'affichent\n        (par ex. « largeur personnalisée » n'apparaît que si scale = custom)\n\n  <i>Ajouter un outil se résume à déclarer ses paramètres : l'interface se génère toute seule</i>"
+    ]
+   ],
+   "reading": [
+    [
+     "Design/Theme.swift",
+     "Voir Palette : la correspondance des couleurs sémantiques ; voir Metrics : l'échelle d'espacements"
+    ],
+    [
+     "Design/Controls.swift",
+     "Voir ParameterForm : comment une déclaration de paramètre choisit son contrôle"
+    ]
+   ]
+  },
+  "dmg": {
+   "principle": "Pour qu'un DMG tourne directement sur <b>n'importe quel Mac</b>, deux problèmes sont à régler : <b>l'architecture</b> (fonctionner aussi bien sur puce Apple que sur Intel) et <b>les dépendances</b> (ne pas obliger l'utilisateur à installer Homebrew).",
+   "why": [
+    [
+     "Pourquoi on ne peut pas copier tel quel le ffmpeg de Homebrew",
+     "Le ffmpeg de Homebrew lie 18 dylib par <b>chemin absolu</b>, par exemple <code>/opt/homebrew/Cellar/ffmpeg/9.0.1_1/lib/libavcodec.63.dylib</code>. Sur une machine sans Homebrew, ces chemins n'existent pas et l'éditeur de liens dynamique échoue net."
+    ],
+    [
+     "Pourquoi passer à une compilation statique",
+     "Un ffmpeg lié statiquement ne dépend que des frameworks système (Foundation, VideoToolbox, etc.), soit zéro dépendance externe. On glisse ce fichier unique dans le paquet de l'application et il tourne : aucun chemin d'installation à réécrire, aucune fermeture de dépendances à gérer."
+    ],
+    [
+     "Pourquoi télécharger séparément les deux architectures",
+     "Les builds statiques sont publiés par architecture. On télécharge une version arm64 et une version x86_64, puis on les fusionne en binaire universel avec <code>lipo -create</code>. Le même paquet démarre alors sur les deux types de Mac."
+    ],
+    [
+     "Pourquoi cwebp demande un traitement particulier",
+     "cwebp n'a pas de build statique : il lie 8 bibliothèques Homebrew (libwebp, libtiff, libpng, libjpeg, etc.). On copie donc récursivement toute la fermeture de dépendances dans <code>Contents/Frameworks</code>, puis <code>install_name_tool</code> réécrit les références en <code>@rpath</code>."
+    ],
+    [
+     "Pourquoi la vérification passe par otool plutôt que par une exécution",
+     "Lancer directement une application GUI ouvre une fenêtre et bloque le script de build — c'est précisément ce qui faisait surgir une fenêtre à chaque compilation au début. On vérifie donc statiquement avec <code>otool -L</code> que toutes les dépendances se résolvent."
+    ]
+   ],
+   "steps": [
+    [
+     "Télécharger et vérifier les outils statiques",
+     "<code>fetch-tools.sh</code> télécharge les outils, puis vérifie que l'architecture correspond et que le nombre de dépendances non système vaut 0 ; sinon il s'arrête sur une erreur."
+    ],
+    [
+     "Compiler les deux architectures",
+     "On compile une fois avec <code>-target arm64-apple-macosx14.0</code> et une fois avec <code>-target x86_64-apple-macosx14.0</code>, puis on fusionne avec <code>lipo</code>."
+    ],
+    [
+     "Embarquer les outils",
+     "ffmpeg et ffprobe sont fusionnés en binaires universels ; 7z est copié tel quel ; cwebp est copié avec sa fermeture de dépendances et ses chemins sont réécrits."
+    ],
+    [
+     "Signature",
+     "On signe d'abord les binaires et les bibliothèques embarqués, et le paquet de l'application en dernier : inverser l'ordre invalide la signature externe."
+    ],
+    [
+     "Vérification",
+     "On contrôle l'architecture de l'application, le bon fonctionnement de chaque outil et la résolution de toutes les dépendances."
+    ],
+    [
+     "Empaquetage",
+     "<code>hdiutil create</code> produit une image compressée en lecture seule et y ajoute un raccourci vers Applications."
+    ]
+   ],
+   "pitfalls": [
+    [
+     "Le 7z du DMG ne faisait que 64 octets",
+     "Le <code>7z</code> de Homebrew est un script shell qui ne contient qu'un chemin vers le vrai binaire. La copie directe ne récupérait que le script.",
+     "On analyse le script d'enrobage, on trouve le vrai binaire et on copie celui-là."
+    ],
+    [
+     "Le script de vérification signalait à tort des dépendances externes dans ffmpeg",
+     "<code>otool -L</code> sur un binaire universel affiche d'abord un en-tête d'architecture, de la forme <code>chemin (architecture x86_64):</code>. <code>awk '{print $1}'</code> prenait cette ligne pour une dépendance.",
+     "On ne retient que les lignes commençant par une tabulation, les vraies lignes de dépendance."
+    ],
+    [
+     "hdiutil renvoyait « operation not permitted »",
+     "Créer une image disque exige le droit de monter des périphériques, refusé dans un environnement restreint.",
+     "Le script détecte l'échec et affiche un message clair avec la commande manuelle, au lieu de produire silencieusement un résultat vide."
+    ]
+   ],
+   "diagrams": [
+    [
+     "Anatomie du binaire universel",
+     "\n  <b>FormatForge.app</b>\n  ├── Contents/\n  │   ├── MacOS/FormatForge          <i>arm64 + x86_64</i> (fusionnés par lipo)\n  │   ├── Frameworks/                 <u>les 8 bibliothèques de cwebp</u>\n  │   │   ├── libwebp.7.dylib         install_name → @rpath/libwebp.7.dylib\n  │   │   ├── libtiff.6.dylib\n  │   │   ├── libpng16.16.dylib\n  │   │   └── …\n  │   └── Resources/Tools/\n  │       ├── ffmpeg                  <i>arm64 + x86_64</i>  133 Mo  statique\n  │       ├── ffprobe                 <i>arm64 + x86_64</i>  133 Mo  statique\n  │       ├── 7z                      arm64              428 Ko  statique\n  │       └── cwebp                   arm64               76 Ko  @rpath\n  └── Info.plist\n\n  <b>Ordre de recherche à l'exécution</b>\n     1. Resources/Tools/ dans l'application   ← en premier\n     2. chemin ffmpeg défini par l'utilisateur\n     3. /opt/homebrew/bin · /usr/local/bin · /usr/bin"
+    ]
+   ],
+   "reading": [
+    [
+     "Scripts/fetch-tools.sh",
+     "Voir la vérification des dépendances : pourquoi il faut zéro pour valider"
+    ],
+    [
+     "make-dmg.sh",
+     "Voir bundle_cwebp : la copie récursive de la fermeture de dépendances ; voir verify_bundle"
+    ],
+    [
+     "Core/ProcessRunner.swift",
+     "Voir locate() : l'ordre de recherche en trois étapes"
+    ]
+   ]
+  }
+ },
+ "articleIndex": {
+  "arch": {
+   "title": "Architecture d'ensemble",
+   "blurb": "Deux partis pris structurent tout le projet : <b>chaque outil doit posséder son propre état de travail</b>, et <b>des fonctions de nature différente ne devraient pas partager le même flux d'interaction</b>.",
+   "files": [
+    "App/AppState.swift",
+    "Core/ToolSession.swift",
+    "Core/Tool.swift"
+   ]
+  },
+  "pipeline": {
+   "title": "Pipeline d'exécution des tâches",
+   "blurb": "Entre le clic sur le bouton et l'écriture du fichier s'enchaînent construction des arguments, exécution du sous-processus, remontée de la progression et consolidation des résultats. La difficulté n'est pas « appeler un outil en ligne de commande », mais la régulation de la concurrence, l'annulation et la remontée de progression en direct.",
+   "files": [
+    "Core/JobQueue.swift",
+    "Core/ProcessRunner.swift",
+    "Core/JobLog.swift"
+   ]
+  },
+  "ffmpeg": {
+   "title": "Pilotage de ffmpeg et analyse de la progression",
+   "blurb": "Toutes les fonctions vidéo reposent sur ffmpeg. La difficulté réside dans la justesse des combinaisons d'arguments : encodeurs, conteneurs, formats de pixels et filtres sont liés par une foule de contraintes implicites.",
+   "files": [
+    "Core/FFmpeg.swift",
+    "Core/MediaProbe.swift"
+   ]
+  },
+  "gif": {
+   "title": "Un encodeur GIF écrit maison",
+   "blurb": "L'ImageIO de macOS sait lire le GIF mais pas l'écrire : toute la sortie est donc maison — quantification median cut, compression LZW, tramage Bayer et composition des transitions image par image.",
+   "files": [
+    "Codecs/GifEncoder.swift"
+   ]
+  },
+  "markdown": {
+   "title": "Conversion Markdown bidirectionnelle écrite maison",
+   "blurb": "Sans dépendance à pandoc. Dans un sens, l'analyse produit du texte enrichi ; dans l'autre, la syntaxe Markdown est déduite des caractéristiques de police.",
+   "files": [
+    "Features/Document/MarkdownConverter.swift"
+   ]
+  },
+  "hash": {
+   "title": "Cinq sommes de contrôle en une seule passe",
+   "blurb": "Une seule lecture du fichier, envoyée aux cinq hacheurs en parallèle. Sur un fichier de 4 Go, cela fait quatre lectures de disque en moins.",
+   "files": [
+    "Core/HashEngine.swift"
+   ]
+  },
+  "inspect": {
+   "title": "Outils d'inspection : déposer un fichier suffit",
+   "blurb": "Les outils d'inspection n'ont pas de bouton, n'entrent pas dans la file et ne demandent pas où sauvegarder : on dépose un fichier, le résultat apparaît.",
+   "files": [
+    "Core/Inspection.swift",
+    "Features/Inspect/ImageInspector.swift"
+   ]
+  },
+  "image": {
+   "title": "Cœur du traitement d'image",
+   "blurb": "Redimensionnement, recadrage, rotation, coins arrondis, filigranes et assemblage passent tous par CoreGraphics, sans dépendre d'ImageMagick.",
+   "files": [
+    "Features/Image/ImageSupport.swift"
+   ]
+  },
+  "estimate": {
+   "title": "Estimation du poids et de la durée",
+   "blurb": "Le modèle combine une valeur empirique de bits par pixel par encodeur et le débit mesuré sur la machine.",
+   "files": [
+    "Core/Estimator.swift",
+    "Core/EstimateEngine.swift"
+   ]
+  },
+  "design": {
+   "title": "Système de design de l'interface",
+   "blurb": "Tout repose sur les couleurs sémantiques de macOS et sur des contrôles natifs, avec adaptation automatique au mode clair ou sombre et à la couleur d'accentuation de l'utilisateur.",
+   "files": [
+    "Design/Theme.swift",
+    "Design/Components.swift",
+    "Design/Controls.swift"
+   ]
+  },
+  "dmg": {
+   "title": "Empaquetage en DMG universel",
+   "blurb": "Pour qu'un DMG tourne sur n'importe quel Mac, deux problèmes sont à régler : l'architecture (arm64 + x86_64) et les dépendances (embarquer ffmpeg et ses bibliothèques).",
+   "files": [
+    "Core/ProcessRunner.swift"
+   ]
+  }
+ },
+ "toolNotes": {
+  "video.convert": {
+   "idea": "Le transcodage tient à <b>la bonne combinaison de trois couches de paramètres</b> : l'encodeur décide de la qualité et du poids, le conteneur de la compatibilité, et les deux doivent s'accorder.",
+   "how": [
+    "On récupère l'encodeur cible et l'extension du conteneur dans les paramètres.",
+    "On valide le couple : VP9/AV1 ne peuvent aller que dans WebM ou MKV, donc choisir MP4 bascule automatiquement le conteneur sur WebM ; inversement, H.264 avec WebM revient sur MP4.",
+    "On assemble les arguments vidéo : l'encodage logiciel utilise <code>-crf</code> + <code>-preset</code>, l'encodage matériel <code>-q:v</code>.",
+    "On assemble les arguments audio : la copie directe (<code>-c:a copy</code>) est prise en charge, ce qui évite un réencodage inutile.",
+    "Pour MP4/MOV, on ajoute <code>-movflags +faststart</code> afin de déplacer l'index en tête de fichier : la lecture en flux n'attend alors plus le téléchargement complet."
+   ],
+   "notes": [
+    "La correction automatique du conteneur est délibérée : plutôt que de laisser ffmpeg échouer sur une erreur obscure, on s'aligne sur l'intention de l'utilisateur.",
+    "La qualité est réglée par défaut sur CRF 23 (le point d'équilibre éprouvé du H.264) et le preset sur medium."
+   ]
+  },
+  "video.compress": {
+   "idea": "Trois stratégies de compression, parce qu'elles répondent à trois questions distinctes : « jusqu'où la qualité peut-elle descendre », « quelle taille en Mo ne pas dépasser » et « quel débit viser ».",
+   "how": [
+    "Par qualité : on fixe directement le CRF et l'encodeur décide du poids.",
+    "Par taille cible : on déduit d'abord le débit total de <code>(Mo cible × 8 × 1024) ÷ durée</code>, on soustrait le débit audio pour obtenir le débit vidéo, puis on s'en approche en deux passes.",
+    "Par débit : on impose directement le débit moyen.",
+    "L'encodage en deux passes n'a de sens qu'avec le H.264 logiciel — les encodeurs matériels ne le gèrent pas — donc cette branche lance d'abord une passe d'analyse (écrite vers <code>/dev/null</code>), puis l'encodage réel."
+   ],
+   "notes": [
+    "Le mode taille cible réserve 2 % pour le surcoût du conteneur, sinon on dépasse légèrement.",
+    "En deux passes, <code>-pass 1</code> et <code>-pass 2</code> doivent former deux commandes distinctes ; impossible de les réunir dans une seule."
+   ]
+  },
+  "video.resize": {
+   "idea": "Les tailles prédéfinies ne s'échelonnent que sur la hauteur (proportions conservées) ; seul le mode personnalisé a besoin d'un « mode d'ajustement » — un preset est par définition une mise à l'échelle proportionnelle, où « remplir par recadrage » n'a aucun sens.",
+   "how": [
+    "Mode prédéfini : on utilise <code>scale=-2:H</code>, le <code>-2</code> laissant ffmpeg calculer une largeur paire (la plupart des encodeurs l'exigent).",
+    "Mode personnalisé : on calcule d'abord la boîte cible, puis on construit le filtre selon le mode d'ajustement.",
+    "L'affichage complet passe par <code>force_original_aspect_ratio=decrease</code> ; le remplissage par recadrage par <code>increase</code> suivi de <code>crop</code> ; l'étirement fixe simplement largeur et hauteur.",
+    "Quand « autoriser l'agrandissement » est désactivé, <code>min(H\\,ih)</code> borne la cible aux dimensions de la source."
+   ],
+   "notes": [
+    "Mesuré : avec une source 640×360 et une cible 480×480, l'affichage complet donne 480×270, tandis que le remplissage et l'étirement donnent 480×480 (63,8 % de pixels différents)."
+   ]
+  },
+  "video.trim": {
+   "idea": "Deux approches du découpage : <b>le réencodage</b> donne des points de coupe exacts, <b>la copie de flux</b> est très rapide mais les coupes doivent tomber sur des images clés.",
+   "how": [
+    "Mode plage : <code>-ss</code> fixe le début, <code>-to</code> la fin.",
+    "En réencodage, <code>-ss</code> se place après <code>-i</code> pour une coupe exacte.",
+    "En copie de flux, <code>-ss</code> se place avant <code>-i</code>, ce qui permet à ffmpeg de se positionner rapidement.",
+    "Le mode découpage régulier combine <code>-f segment</code> et <code>-segment_time</code>, nomme les sorties <code>seg_%03d</code>, puis les valide une à une dans le dossier de destination."
+   ],
+   "notes": [
+    "En copie de flux, on ajoute <code>-avoid_negative_ts make_zero</code>, faute de quoi les horodatages peuvent devenir négatifs et perturber la lecture."
+   ]
+  },
+  "video.concat": {
+   "idea": "La concaténation fait lire un fichier de liste au démultiplexeur concat, mais <b>assembler directement des vidéos aux paramètres disparates pose problème</b> : il faut donc uniformiser la géométrie.",
+   "how": [
+    "On écrit un fichier de liste avec une ligne <code>file 'chemin'</code> par clip (les apostrophes du chemin doivent être échappées).",
+    "Le mode sans perte se contente de <code>-c copy</code> — à condition que tous les clips partagent exactement les mêmes paramètres d'encodage.",
+    "Mode réencodage : on prend la résolution de la première vidéo comme référence, on ramène tous les clips à la même taille avec <code>scale</code> + <code>pad</code>, on uniformise la cadence avec <code>fps</code>, et on termine par <code>setsar=1</code> pour homogénéiser le rapport de forme des pixels."
+   ],
+   "notes": [
+    "Ici, l'outil doit fournir lui-même le préfixe d'entrée complet ; sinon l'enveloppe générique ajoute un <code>-i</code> de trop et les index d'entrée se décalent — une première version n'a ainsi produit que le premier clip (3 secondes au lieu de 6)."
+   ]
+  },
+  "video.transform": {
+   "idea": "La rotation peut réellement tourner les pixels via un filtre, ou se contenter d'écrire une métadonnée — cette seconde option est instantanée, mais la prise en charge par les lecteurs est inégale.",
+   "how": [
+    "90° dans le sens horaire avec <code>transpose=1</code>, antihoraire avec <code>transpose=2</code>, et 180° avec deux transpose.",
+    "Le miroir passe par <code>hflip</code> / <code>vflip</code>.",
+    "Quand le réencodage est désactivé, on se contente d'écrire la balise via <code>-metadata:s:v:0 rotate=N</code>."
+   ]
+  },
+  "video.speed": {
+   "idea": "La variation de vitesse doit traiter vidéo et audio ensemble, et comme <code>atempo</code> n'accepte que 0.5–2.0, toute valeur hors plage doit être enchaînée.",
+   "how": [
+    "La vidéo utilise <code>setpts=PTS/vitesse</code>.",
+    "Audio : tant que le facteur dépasse 2, on le divise par 2 en gardant trace du reste ; tant qu'il est inférieur à 0.5, on le multiplie par 2 ; on termine avec le facteur restant.",
+    "Ainsi, 8× devient <code>atempo=2,atempo=2,atempo=2</code>."
+   ],
+   "notes": [
+    "Quand « conserver la hauteur » est désactivé, on passe à <code>asetrate</code> : la hauteur varie avec la vitesse (comme une bande accélérée)."
+   ]
+  },
+  "video.watermark": {
+   "idea": "Le ffmpeg de la machine a été compilé sans libfreetype : <b>pas de filtre drawtext</b>. Le filigrane texte est donc rendu en PNG transparent avec CoreText, puis composé via overlay.",
+   "how": [
+    "On mesure les limites réelles du texte avec <code>CTLineGetBoundsWithOptions(.useOpticalBounds)</code> de CoreText, pour éviter les blancs superflus qu'imposerait la hauteur de ligne de la police.",
+    "On effectue le rendu dans un canevas transparent ajusté au texte, et on écrit un PNG.",
+    "Le PNG entre comme second flux, composé par le filtre <code>overlay</code> selon une expression de position.",
+    "Dans l'expression de position, <code>main_w</code>/<code>main_h</code> désignent les dimensions du fond et <code>overlay_w</code>/<code>overlay_h</code> celles du filigrane."
+   ],
+   "notes": [
+    "L'effet de bord est heureux : CoreText offre une prise en charge complète des polices CJK et un anticrénelage de meilleure qualité que drawtext.",
+    "Le filigrane image règle son opacité avec <code>colorchannelmixer=aa=opacité</code>."
+   ]
+  },
+  "video.screenshot": {
+   "idea": "Capture d'une image unique et capture par lots empruntent deux chemins : l'image unique se positionne précisément avec <code>-ss</code>, le lot extrait les images avec le filtre <code>fps</code>.",
+   "how": [
+    "Image unique : <code>-ss</code> avant <code>-i</code> pour un positionnement rapide, avec <code>-frames:v 1</code> pour n'extraire qu'une image.",
+    "Lot : extraction avec <code>fps=1/intervalle</code> vers une séquence numérotée dans un dossier temporaire, puis renommage et validation dans l'ordre.",
+    "Pour N images régulièrement espacées : on calcule la longueur de la plage, on la divise par N pour obtenir l'intervalle équivalent, puis on suit le chemin fps.",
+    "La qualité JPG se convertit à l'envers : le <code>-q:v</code> de ffmpeg va de 2 (meilleur) à 31 (pire), d'où <code>31 - qualité% × 29</code>."
+   ],
+   "notes": [
+    "Le décodage matériel (<code>-hwaccel videotoolbox</code>) est une option d'entrée et doit précéder <code>-i</code>, sinon ffmpeg signale qu'elle « ne peut pas s'appliquer à la sortie »."
+   ]
+  },
+  "video.frames": {
+   "idea": "L'extraction d'images utilise le filtre <code>select</code> avec un modulo sur le numéro d'image, plus précis qu'une extraction temporelle (pas de dérive due à l'alignement sur les images clés).",
+   "how": [
+    "Une image sur N : <code>select=not(mod(n\\,N))</code>, obligatoirement suivi de <code>setpts=N/FRAME_RATE/TB</code> pour reconstruire les horodatages.",
+    "On peut aussi extraire selon la cadence : <code>fps=N</code>.",
+    "Le nommage accepte un numéro d'ordre ou un timecode (la forme <code>00h01m23s456</code>, sans risque d'un système de fichiers à l'autre).",
+    "Un plafond « nombre maximal d'images à exporter » évite qu'une fausse manœuvre ne déverse des dizaines de milliers d'images et ne sature le disque."
+   ]
+  },
+  "video.gif": {
+   "idea": "Un GIF de qualité passe par une <b>palette en deux passes</b> : on analyse d'abord toute la séquence pour bâtir une palette dédiée, puis on quantifie avec elle. Le gain de qualité est net face à une palette générique en une passe.",
+   "how": [
+    "Première passe : <code>palettegen</code> analyse toutes les images de la plage et produit un PNG de palette.",
+    "Seconde passe : la palette entre comme second flux et <code>paletteuse</code> effectue la quantification.",
+    "La chaîne est <code>fps → scale(lanczos) → [reverse] → palettegen/paletteuse</code>.",
+    "Le nombre de boucles correspond à <code>-loop</code> : infini = 0, une seule lecture = -1, 3 fois = 2."
+   ],
+   "notes": [
+    "Le poids d'un GIF grimpe vite ; l'interface conseille de ne pas dépasser 10 secondes.",
+    "Le tramage est au choix : aucun / Bayer / Sierra 2-4A / Floyd-Steinberg."
+   ]
+  },
+  "video.fromimages": {
+   "idea": "Le démultiplexeur image2 de ffmpeg exige des noms de fichiers numérotés consécutivement : on copie donc d'abord les fichiers choisis sous des noms normalisés avant l'assemblage.",
+   "how": [
+    "On copie les entrées dans un dossier temporaire, dans l'ordre, sous les noms <code>frame_%05d.ext</code>.",
+    "On fixe la cadence d'entrée avec <code>-framerate</code> et on lit la séquence numérotée.",
+    "« Chaque image reste N secondes » se traduit par une cadence de <code>1/N</code>.",
+    "Pour une lecture en boucle, <code>split</code> + <code>reverse</code> + <code>concat</code> composent une boucle sans couture, en avant puis en arrière."
+   ]
+  },
+  "video.slideshow": {
+   "idea": "Les transitions passent par le filtre <code>xfade</code>, mais il <b>exige une géométrie identique pour toutes les entrées</b> : chaque image doit donc être normalisée au préalable.",
+   "how": [
+    "On met d'abord chaque image à l'échelle de la résolution cible, en complétant les bords avec <code>contain</code> ou en recadrant avec <code>cover</code>.",
+    "Effet Ken Burns facultatif : un lent zoom avant avec <code>zoompan</code>.",
+    "Chaque image est une entrée à part, avec <code>-loop 1 -t durée</code> — une image fixe ne compte qu'une frame, et sans boucle il n'y a rien à fondre enchaîné.",
+    "On les enchaîne avec <code>xfade</code>, en incrémentant <code>offset</code> de <code>durée par image − durée de transition</code>."
+   ],
+   "notes": [
+    "Durée totale = nombre d'images × durée par image − (nombre − 1) × durée de transition. Mesuré : 3 images de 1 seconde avec une transition de 0,6 seconde = 1,8 seconde.",
+    "La musique de fond entre en dernier, avec <code>-shortest</code> pour aligner les durées."
+   ]
+  },
+  "video.audio.extract": {
+   "idea": "Extraire une piste audio et la supprimer sont deux opérations opposées, réunies derrière une même entrée d'outil.",
+   "how": [
+    "Extraction : on ajoute <code>-vn</code> (pas de vidéo) et on choisit l'encodeur selon le format cible.",
+    "Suppression : <code>-c copy -an</code>, le flux vidéo est copié sans réencodage, donc l'opération est instantanée.",
+    "L'option « conserver aussi une vidéo muette » produit, après extraction de l'audio, une seconde vidéo dépourvue de piste son."
+   ]
+  },
+  "video.audio.merge": {
+   "idea": "Remplacer et mixer répondent à deux besoins différents : remplacer, c'est « écraser avec la nouvelle piste » ; mixer, c'est « faire jouer les deux pistes ensemble ».",
+   "how": [
+    "On répartit d'abord les entrées en un groupe vidéo et un groupe audio selon l'extension, et on en prend une de chaque.",
+    "Remplacement : <code>-map 0:v -map [a1]</code>, avec copie du flux vidéo.",
+    "Mixage : on combine la piste d'origine et la nouvelle avec <code>amix=inputs=2:duration=first</code>.",
+    "Volume, délai et fondus s'enchaînent en une seule chaîne de filtres audio."
+   ],
+   "notes": [
+    "Quand la chaîne de filtres est vide, il faut ajouter <code>anull</code>, sinon un graphe de filtres vide provoque une erreur. Ce bug se déclenche avec les paramètres par défaut."
+   ]
+  },
+  "video.cover": {
+   "idea": "La pochette peut être une image intégrée à la vidéo, ou une image exportée depuis l'une de ses frames.",
+   "how": [
+    "Définir la pochette : l'image entre comme second flux, on la marque comme image jointe avec <code>-disposition:v:1 attached_pic</code>, et le flux vidéo est copié.",
+    "Extraire la pochette : on demande d'abord à ffprobe si un flux <code>attached_pic</code> existe ; si oui on prend <code>0:v:1</code>, sinon la première frame.",
+    "Générer depuis une frame : on se positionne avec <code>-ss</code> et on prélève une frame."
+   ]
+  },
+  "video.fingerprint": {
+   "idea": "Modifier le hachage d'un fichier <b>sans réencoder ni toucher à l'image</b>, uniquement en changeant les métadonnées et en remultiplexant la structure du fichier.",
+   "how": [
+    "On copie tous les flux avec <code>-c copy</code> : pas un seul bit n'est réencodé.",
+    "On écrit une balise aléatoire dans la métadonnée <code>comment</code>, avec randomisation facultative du titre.",
+    "On ajoute <code>-movflags +faststart</code> pour réorganiser le conteneur, ce qui modifie à soi seul le flux d'octets."
+   ],
+   "notes": [
+    "La vérification compte ici : avant et après modification, le <b>nombre de frames mesuré est identique (180 frames)</b>, preuve que l'image n'a vraiment pas été réencodée."
+   ]
+  },
+  "video.strip": {
+   "idea": "Supprimer les métadonnées privées (appareil de prise de vue, GPS, date de création), là encore sans réencodage.",
+   "how": [
+    "On vide toutes les métadonnées avec <code>-map_metadata -1</code>.",
+    "On peut conserver l'information de rotation — les vidéos en portrait en dépendent, et la supprimer les fait basculer en paysage."
+   ]
+  },
+  "image.convert": {
+   "idea": "La clé d'une conversion de format est <b>l'accord entre transparence et paramètres avec perte</b> : le JPEG ne gère pas la transparence, et une conversion vers lui donne un fond noir.",
+   "how": [
+    "On lit d'abord l'image et on corrige l'orientation EXIF.",
+    "On redimensionne éventuellement selon le paramètre « traitement des dimensions ».",
+    "Quand le format cible ignore la transparence (JPEG/BMP), on pose d'abord un fond blanc avant de composer.",
+    "Les formats qu'ImageIO sait écrire sont écrits directement ; le WebP passe par le cwebp embarqué."
+   ],
+   "notes": [
+    "Mesuré : le passage de JPG à WebP fait tomber le poids de 28 Ko à 12 Ko.",
+    "HEIC/AVIF sont également pris en charge, mais l'encodage est plus lent."
+   ]
+  },
+  "image.compress": {
+   "idea": "La compression à taille cible s'approche par <b>recherche dichotomique</b> : aucun encodeur n'offre d'option « donne-moi 500 Ko », il faut essayer.",
+   "how": [
+    "Par qualité : on prend la valeur indiquée telle quelle.",
+    "Par taille cible / pourcentage : recherche dichotomique entre 0,05 et 1,0, avec un encodage vers un fichier temporaire et une mesure de taille à chaque tour, 7 tours au maximum, et arrêt anticipé dès que l'écart passe sous 8 %.",
+    "Le PNG est un format sans perte : le réencoder fait généralement grossir le fichier, d'où le basculement automatique vers JPEG."
+   ],
+   "notes": [
+    "La recherche dichotomique ajoute jusqu'à 7 encodages par image, ce qui ralentit nettement le traitement par lots — c'est le compromis de la précision contre le temps."
+   ]
+  },
+  "image.resize": {
+   "idea": "« Réduire seulement, jamais agrandir » est actif par défaut, car l'agrandissement ne fait que flouter l'image et alourdir le fichier.",
+   "how": [
+    "On calcule la taille cible selon le mode : largeur/hauteur imposée, dimensions exactes, pourcentage ou grand côté borné.",
+    "Si la réduction seule est active, la cible est bornée aux dimensions de la source.",
+    "On redessine avec CoreGraphics à la qualité d'interpolation <code>.high</code>."
+   ]
+  },
+  "image.transform": {
+   "idea": "On recadre avant de tourner, et l'ordre ne s'inverse pas : tourner d'abord changerait le repère dans lequel le recadrage proportionnel s'effectue.",
+   "how": [
+    "Recadrage centré proportionnel : on calcule l'écart entre le rapport source et le rapport cible, puis on prend le plus grand rectangle inscrit.",
+    "Retrait en pourcentage : on rentre les quatre côtés de la proportion indiquée.",
+    "La rotation passe par <code>rotate</code> de CGContext, en échangeant largeur et hauteur.",
+    "Le miroir s'obtient avec <code>scaleBy(x: -1)</code>."
+   ]
+  },
+  "image.stitch": {
+   "idea": "L'assemblage doit d'abord fixer une <b>taille de cellule uniforme</b>, sinon des images de tailles différentes donnent un résultat irrégulier.",
+   "how": [
+    "Horizontal : on prend l'image la plus haute comme référence et on met les autres à la même hauteur, proportions conservées.",
+    "Vertical : on prend l'image la plus large comme référence.",
+    "Grille : la largeur et la hauteur maximales donnent la cellule, et chaque image est mise à l'échelle en contain puis centrée.",
+    "L'origine des coordonnées CoreGraphics est en bas à gauche, donc les numéros de ligne se convertissent de haut en bas : <code>y = hauteur totale − (ligne+1) × hauteur de cellule − ligne × espacement</code>."
+   ]
+  },
+  "image.watermark": {
+   "idea": "Les paramètres du filigrane se calculent en <b>pourcentage de la largeur de l'image</b>, ce qui garde des proportions visuelles constantes sur tout un lot.",
+   "how": [
+    "Le filigrane texte est dessiné avec CoreText ; le filigrane image est mis à l'échelle proportionnellement, puis dessiné.",
+    "Les positions passent par l'énumération <code>WatermarkPosition</code> ; au calcul, attention à l'origine de CoreGraphics en bas à gauche.",
+    "L'opacité se règle via <code>context.setAlpha</code>."
+   ],
+   "notes": [
+    "Convention du filigrane image : l'image du filigrane est ajoutée en dernier ; toutes les autres sont à traiter."
+   ]
+  },
+  "image.decorate": {
+   "idea": "Coins arrondis, contour et ombre doivent être dessinés dans le bon ordre : l'ombre d'abord, puis le recadrage et le dessin de l'image, et le contour en dernier.",
+   "how": [
+    "On construit le chemin arrondi avec <code>CGPath(roundedRect:)</code>.",
+    "Ombre : on règle le shadow puis on remplit le chemin (la couleur de remplissage passe sous l'ombre, seul l'effet d'ombre demeure).",
+    "On découpe selon le chemin avant de dessiner l'image, ce qui élimine tout ce qui dépasse des coins arrondis.",
+    "Le contour vient en dernier. Avec une ombre, il faut réserver 40px autour du canevas, sinon elle est rognée."
+   ]
+  },
+  "image.gif": {
+   "idea": "Un encodeur GIF écrit maison, car macOS sait lire le GIF mais pas l'écrire. Voir la section « Un encodeur GIF écrit maison ».",
+   "how": [
+    "On décode toutes les frames et on les rend dans un canevas homogène.",
+    "On insère des frames de transition entre les frames voisines.",
+    "On échantillonne toute la séquence et on effectue un seul median cut pour obtenir une palette commune.",
+    "On convertit les pixels en index via la table de correspondance, avec tramage Bayer en option.",
+    "On encode en LZW, puis on écrit la structure GIF89a."
+   ]
+  },
+  "image.topdf": {
+   "idea": "On dessine page par page dans un contexte PDF CoreGraphics, au choix « même taille que l'image » ou papier standard.",
+   "how": [
+    "On crée un <code>CGContext(consumer:mediaBox:)</code>.",
+    "En « même taille que l'image », le mediaBox de chaque page correspond aux dimensions en pixels de l'image.",
+    "Avec du papier standard, le rectangle de dessin découle du mode d'ajustement ; pour le remplissage par recadrage, on <code>clip</code> d'abord sur la zone de contenu avant de dessiner.",
+    "Orientation automatique : une image en paysage sur du papier portrait devient automatiquement une page en paysage."
+   ]
+  },
+  "pdf.toimage": {
+   "idea": "On rasterise chaque page avec PDFKit au DPI demandé. La difficulté tient à la conversion de repère : l'origine d'un PDF est en bas à gauche, et il faut mettre à l'échelle selon le DPI.",
+   "how": [
+    "On calcule le facteur d'échelle <code>DPI ÷ 72</code> (la base d'un PDF étant 72 DPI).",
+    "On crée un CGContext aux dimensions en pixels correspondantes.",
+    "On applique <code>scaleBy</code> puis <code>translateBy</code> pour projeter les coordonnées de la page PDF sur le canevas cible.",
+    "On effectue le rendu page par page et on écrit le résultat."
+   ]
+  },
+  "image.rename": {
+   "idea": "Le plus grand risque du renommage par lots, ce sont les <b>collisions de noms</b> — quand a devient b pendant que b devient c, renommer directement fait s'écraser les fichiers entre eux.",
+   "how": [
+    "On trie d'abord les fichiers selon la règle choisie et on établit le plan complet « source → cible ».",
+    "À l'exécution, on renomme d'abord vers un nom temporaire aléatoire, puis vers le nom cible, ce qui évite les collisions en chaîne.",
+    "Le modèle gère <code>{n}</code> pour le numéro d'ordre, <code>{name}</code> pour le nom d'origine, <code>{date}</code> pour la date, <code>{i}</code> pour l'index d'origine et <code>{ext}</code> pour l'extension.",
+    "Le mode aperçu est actif par défaut : il montre le plan sans renommer quoi que ce soit."
+   ]
+  },
+  "utility.qr": {
+   "idea": "Génération avec <code>CIQRCodeGenerator</code> de CoreImage, identification avec Vision.",
+   "how": [
+    "Génération : <code>CIQRCodeGenerator</code> produit le code, <code>CIFalseColor</code> applique les couleurs, et le résultat est agrandi à la taille voulue.",
+    "La correction d'erreur se décline en quatre niveaux, L/M/Q/H : plus le niveau est élevé, plus le code tolère les dégradations, mais plus les modules sont denses.",
+    "Identification : <code>VNDetectBarcodesRequest</code>, qui couvre QR, Aztec, Code128, EAN13, PDF417 et DataMatrix."
+   ]
+  },
+  "utility.rehash": {
+   "idea": "Changer le hachage d'un fichier sans toucher à son contenu — en ajoutant des octets aléatoires à la fin.",
+   "how": [
+    "On copie le fichier d'origine, puis on ajoute N octets aléatoires (en mode ajout, le contenu existant reste totalement intact).",
+    "On recalcule le MD5 et on consigne l'ancienne et la nouvelle valeur pour vérifier que le changement a bien eu lieu.",
+    "Pour des formats comme ZIP et PDF, des octets ajoutés en fin de fichier n'empêchent généralement pas de l'ouvrir normalement."
+   ],
+   "notes": [
+    "Cet outil <b>écrit des fichiers</b>, contrairement à « Vérification de fichier » qui est en lecture seule : ce sont deux outils distincts. L'inspecteur, lui, ne modifie jamais aucun fichier."
+   ]
+  },
+  "doc.word2pdf": {
+   "idea": "On pagine automatiquement avec <code>CTFramesetter</code> de CoreText, plus fiable que de calculer les coupures à la main.",
+   "how": [
+    "On lit le document source dans un <code>NSAttributedString</code>.",
+    "On crée un <code>CTFramesetter</code> et on dispose un frame dans la zone de la page.",
+    "<code>CTFrameGetVisibleStringRange</code> indique la quantité de texte qui tient sur la page ; on reprend de là sur la page suivante, jusqu'à épuisement du texte.",
+    "On plafonne à 5000 pages pour qu'une entrée malformée ne provoque pas de boucle infinie."
+   ]
+  },
+  "doc.pdf2word": {
+   "idea": "La couche texte d'un PDF doit être <b>réassemblée</b> — les retours à la ligne d'un PDF relèvent de la mise en page, pas des limites de paragraphe.",
+   "how": [
+    "On récupère <code>page.string</code> page par page avec PDFKit.",
+    "On fusionne les <code>-\\n</code> (césures avec trait d'union), on remplace les retours à la ligne simples par des espaces et on comprime les suites d'espaces.",
+    "On insère un séparateur entre les pages.",
+    "En l'absence de couche texte, on renvoie une erreur explicite en suggérant l'OCR, plutôt que de produire un document vide."
+   ]
+  },
+  "doc.txt2word": {
+   "idea": "Dans un fichier texte brut, les retours à la ligne sont des coupures dures : les reprendre tels quels donne des paragraphes en morceaux, d'où une <b>fusion intelligente</b>.",
+   "how": [
+    "Les lignes vides marquent les limites de paragraphe.",
+    "Les lignes non vides s'accumulent dans un tampon et ne sont réunies en un paragraphe (par des espaces) qu'à l'arrivée d'une ligne vide.",
+    "Option « reconnaître les lignes de titre » : les lignes courtes en majuscules, ou celles commençant par <code>#</code>, reçoivent un style de titre."
+   ]
+  },
+  "doc.word2txt": {
+   "idea": "Extraire le texte brut, avec le choix de conserver ou non les sauts de paragraphe.",
+   "how": [
+    "On lit le fichier en texte enrichi, puis on en extrait <code>.string</code>.",
+    "Quand « conserver les sauts de paragraphe » est désactivé, les retours à la ligne deviennent des espaces, ce qui donne un texte continu."
+   ]
+  },
+  "doc.word2md": {
+   "idea": "La conversion inverse <b>déduit la syntaxe des caractéristiques de police</b>. Voir « Conversion Markdown bidirectionnelle écrite maison ».",
+   "how": [
+    "On découpe le texte aux frontières où les attributs changent.",
+    "Taille ≥ 24pt → <code>#</code>, ≥ 20pt → <code>##</code>, et ainsi de suite.",
+    "Gras + italique → <code>***</code> ; chasse fixe → accents graves ; attribut link → syntaxe de lien.",
+    "<code>NSParagraphStyle.textLists</code> → marqueurs de liste."
+   ]
+  },
+  "doc.pdf2md": {
+   "idea": "Même logique d'extraction que PDF → Word, mais la sortie est du Markdown, avec un séparateur entre les pages.",
+   "how": [
+    "On extrait le texte page par page et on le concatène.",
+    "On insère un séparateur <code>---</code> entre chaque page."
+   ]
+  },
+  "doc.md2word": {
+   "idea": "Notre analyseur Markdown maison effectue le rendu en texte enrichi stylisé.",
+   "how": [
+    "On classe les lignes une à une : titre, liste, citation, bloc de code, tableau ou paragraphe.",
+    "Le balisage en ligne est analysé en un seul passage (gras, italique, code, liens, images).",
+    "Les blocs de code sont émis d'un seul tenant, en chasse fixe sur fond gris."
+   ]
+  },
+  "doc.md2pdf": {
+   "idea": "Le Markdown est d'abord rendu en texte enrichi, puis paginé et exporté en PDF avec CoreText.",
+   "how": [
+    "On réutilise l'analyseur Markdown pour obtenir du texte enrichi.",
+    "On calcule la zone utile en A4/Letter/A3 et on compose page par page."
+   ]
+  },
+  "doc.txt2pdf": {
+   "idea": "La même fusion intelligente des paragraphes que TXT → Word, suivie d'une exportation PDF.",
+   "how": [
+    "On fusionne les paragraphes scindés par des coupures de ligne dures.",
+    "On peut reconnaître les lignes de titre et augmenter leur taille de police.",
+    "On pagine selon le format de page."
+   ]
+  },
+  "doc.tortf": {
+   "idea": "Le RTF est le format de texte enrichi le plus compatible : pratiquement tous les traitements de texte l'ouvrent.",
+   "how": [
+    "On écrit directement avec <code>NSAttributedString.data(documentAttributes:)</code>.",
+    "En cas d'échec, on retombe sur le <code>textutil</code> du système."
+   ]
+  },
+  "doc.tohtml": {
+   "idea": "On produit du HTML, directement publiable sur une page web.",
+   "how": [
+    "On le génère avec l'écrivain HTML du système, en conservant les styles de base et les liens."
+   ]
+  },
+  "doc.toodt": {
+   "idea": "L'ODT est le format ouvert commun à LibreOffice et WPS.",
+   "how": [
+    "On privilégie l'écrivain du système ; s'il ne prend pas le format en charge, on passe par le RTF et on laisse textutil convertir."
+   ]
+  },
+  "doc.pdfmerge": {
+   "idea": "Lors de la fusion, la première page de chaque fichier source devient un signet, ce qui permet de naviguer rapidement dans le document fusionné.",
+   "how": [
+    "On crée un PDFDocument vide et on y insère les pages de chaque fichier source, l'un après l'autre.",
+    "On note l'index de la première page de chaque source et on crée un nœud <code>PDFOutline</code>.",
+    "On rattache les nœuds à <code>outlineRoot</code>."
+   ]
+  },
+  "doc.pdfsplit": {
+   "idea": "Trois modes de découpage : un fichier par N pages, un fichier par page, ou l'extraction d'une plage donnée.",
+   "how": [
+    "On boucle sur le nombre de pages, en créant à chaque tour un PDFDocument et en y insérant les pages correspondantes.",
+    "Les fichiers de sortie portent un numéro de partie ou la plage de pages."
+   ]
+  },
+  "doc.pdfcompress": {
+   "idea": "Le poids d'un document scanné vient surtout des images haute résolution qu'il contient : on <b>rasterise donc chaque page en JPEG à un DPI plus bas, puis on la réinsère</b>.",
+   "how": [
+    "On calcule le facteur d'échelle d'après le DPI cible et on rend chaque page en bitmap.",
+    "On réencode à la qualité JPEG choisie.",
+    "On remplace les pages d'origine par les nouvelles."
+   ],
+   "notes": [
+    "Conversion en niveaux de gris en option : un JPEG en gris pèse bien moins qu'en couleur, ce qui convient aux scans de texte seul."
+   ]
+  },
+  "doc.pdfsecurity": {
+   "idea": "Le chiffrement passe par les options d'écriture de PDFKit ; le déchiffrement exige de vérifier d'abord le mot de passe.",
+   "how": [
+    "Chiffrement : on règle <code>userPasswordOption</code> et <code>ownerPasswordOption</code>, et on combine les bits de permission à partir du masque brut de <code>PDFAccessPermissions</code>.",
+    "Déchiffrement : on vérifie avec <code>unlock(withPassword:)</code>, puis on enregistre une copie."
+   ],
+   "notes": [
+    "PDFKit utilise toujours AES-256 ; l'option « force du chiffrement » dans l'interface n'est qu'indicative.",
+    "Les bits de permission doivent être combinés en <code>UInt</code> brut — Swift pont cet enum en Optional, et appeler <code>formUnion</code> directement ne compile pas."
+   ]
+  },
+  "doc.ocr": {
+   "idea": "On utilise la reconnaissance de texte de Vision, avec une sortie en texte brut, en Markdown ou en <b>PDF interrogeable</b>.",
+   "how": [
+    "Le PDF est d'abord rasterisé en une séquence d'images au DPI choisi.",
+    "On exécute <code>VNRecognizeTextRequest</code> sur chaque image.",
+    "PDF interrogeable : après avoir dessiné l'image d'origine, on superpose le résultat de la reconnaissance en <b>texte transparent</b> aux positions correspondantes — Vision renvoie des coordonnées normalisées (origine en bas à gauche), identiques à celles d'un PDF, donc directement réutilisables."
+   ]
+  },
+  "archive.create": {
+   "idea": "Le fractionnement repose sur le paramètre <code>-v</code> de 7z, et le chiffrement sur <code>-p</code> combiné à <code>-mhe=on</code> pour chiffrer aussi les noms de fichiers.",
+   "how": [
+    "On choisit les paramètres selon le format : <code>-tzip</code> pour ZIP, <code>-t7z</code> pour 7z.",
+    "Fractionnement : une taille prédéfinie se passe directement (par ex. <code>-v100m</code>) ; pour un nombre de parties, on estime d'abord la taille totale et on la divise par le nombre de parties.",
+    "Chiffrement : <code>-p</code> suivi du mot de passe ; pour le 7z, on ajoute <code>-mhe=on</code> afin de chiffrer aussi les noms de fichiers.",
+    "Niveau de compression : <code>-mx=0…9</code>."
+   ],
+   "notes": [
+    "Pour un fractionnement par nombre de parties, la taille compressée est estimée à 75 % — le taux de compression dépend du contenu et ne se prévoit pas exactement.",
+    "« Archiver sans compresser » (niveau 0) convient aux fichiers déjà compressés et va bien plus vite."
+   ]
+  },
+  "archive.extract": {
+   "idea": "À l'extraction, le nom du dossier doit perdre tous les suffixes d'archive, sinon <code>movie.7z.001</code> produit un dossier nommé <code>movie.7z</code>.",
+   "how": [
+    "On retire les suffixes composés (<code>.tar.gz</code> et autres).",
+    "On retire les suffixes de volume numérotés (<code>.001</code>, <code>.part1</code>).",
+    "On retire le suffixe d'archive simple (<code>.7z</code>, <code>.zip</code>).",
+    "On utilise <code>-aos</code> pour ignorer les fichiers déjà présents, ou <code>-aoa</code> pour les écraser."
+   ],
+   "notes": [
+    "En cas de mauvais mot de passe, le message de 7z n'est pas très parlant : on cherche donc le mot-clé password dans sa sortie pour afficher un message clair, du type « mot de passe incorrect, ou cette archive est chiffrée »."
+   ]
+  },
+  "utility.hash": {
+   "idea": "Une seule lecture produit cinq sommes de contrôle, sans obliger l'utilisateur à choisir un algorithme au préalable. Voir « Cinq sommes de contrôle en une seule passe ».",
+   "how": [
+    "Lecture en flux par blocs de 1 Mo.",
+    "Chaque bloc alimente en même temps MD5, SHA-1, SHA-256, SHA-512 et notre propre implémentation de CRC32.",
+    "Chaque ligne de résultat porte un bouton de copie.",
+    "On peut coller une valeur attendue pour comparaison ; l'interface signale la concordance par ✓ ou ✗."
+   ]
+  },
+  "utility.info": {
+   "idea": "Les champs affichés pour une image dépendent du <b>type de fichier</b> — une image n'a ni durée ni cadence.",
+   "how": [
+    "On détermine d'abord le type par l'extension, et on ne retombe sur l'examen des flux par ffprobe que si le conteneur est ambigu.",
+    "Les données sont collectées en cinq groupes : fichier, dimensions et résolution, couleur, paramètres de prise de vue, localisation.",
+    "Le groupe des dimensions inclut la taille d'impression : le nombre de pixels ÷ le DPI, converti en pouces et en centimètres.",
+    "La palette dominante est extraite par quantification median cut, sous forme de 6 couleurs représentatives."
+   ],
+   "notes": [
+    "En pratique, un seul JPEG fournit 5 groupes et plus de 19 champs, sans durée, cadence ni débit parmi eux."
+   ]
+  },
+  "archive.info": {
+   "idea": "<code>7z l -slt</code> fournit une liste structurée de paires clé/valeur, dont on extrait le chemin, la taille d'origine et la taille compressée de chaque entrée.",
+   "how": [
+    "On exécute <code>7z l -slt</code> et on analyse la sortie d'après des préfixes tels que <code>Path = </code>.",
+    "On totalise le nombre d'entrées, la taille d'origine et la taille compressée, puis on calcule le pourcentage d'économie.",
+    "La liste de contenu affiche au plus 300 entrées ; au-delà, le total est indiqué."
+   ]
+  }
+ },
+ "fileNotes": {
+  "App/FormatForgeApp.swift": "Point d'entrée de l'application : enregistre la fenêtre, les commandes de la barre de menus et les raccourcis globaux.",
+  "App/AppState.swift": "Cœur de l'état global. Détient les 53 sessions d'outils et gère la sélection, les entrées, l'estimation, l'inspection et la mise en file.",
+  "App/MainWindow.swift": "Fenêtre principale : disposition en trois colonnes, barre latérale, palette de commandes et bandeau d'information.",
+  "App/Workspace.swift": "Espace de travail d'un outil : zone d'entrée, presets, paramètres, estimation, sortie et barre d'exécution.",
+  "App/Inspector.swift": "Panneau de droite : liste des tâches, visionneuse de journal et informations du média.",
+  "App/InspectionView.swift": "Rendu en ligne des rapports d'inspection (regroupement, copie, marqueurs d'état).",
+  "App/SettingsView.swift": "Panneau de réglages : emplacement de sortie, parallélisme, encodage matériel et état des dépendances.",
+  "Core/Tool.swift": "Modèle d'outil : déclaration des paramètres, visibilité conditionnelle, type de résultat et libellé du bouton.",
+  "Core/ToolSession.swift": "État de session propre à chaque outil, socle du travail en parallèle sur plusieurs outils.",
+  "Core/JobQueue.swift": "File de tâches : ordonnancement concurrent, remontée de progression, annulation et consolidation des résultats.",
+  "Core/JobLog.swift": "Système de journal : entrées de journal, enregistrement des lignes de commande et événements de cycle de vie.",
+  "Core/ProcessRunner.swift": "Encapsulation des sous-processus : localisation des outils (versions embarquées d'abord), sortie en flux et annulation.",
+  "Core/FFmpeg.swift": "Construction des arguments ffmpeg, analyse de la progression et tableau de référence des codecs.",
+  "Core/MediaProbe.swift": "Encapsulation de ffprobe : détermination du type de média et mise en cache des métadonnées.",
+  "Core/Estimator.swift": "Modèle d'estimation du poids et de la durée (tables de débit par encodeur + débit de la machine).",
+  "Core/EstimateEngine.swift": "Répartit le calcul des estimations selon l'outil et les paramètres.",
+  "Core/Presets.swift": "Définition centralisée de tous les modèles de preset.",
+  "Core/HashEngine.swift": "Implémentation multi-algorithmes en une seule passe des cinq sommes de contrôle (CRC32 compris).",
+  "Core/Inspection.swift": "Modèle de rapport et protocole des outils d'inspection.",
+  "Core/FileIO.swift": "Utilitaires de fichiers : gestion des conflits, expansion des dossiers et fichiers temporaires.",
+  "Core/AppSettings.swift": "Persistance des préférences utilisateur et résolution de l'emplacement de sortie.",
+  "Core/Utilities.swift": "Classification des extensions, analyse des polices et assistants de concurrence.",
+  "Codecs/GifEncoder.swift": "Encodeur GIF maison : quantification median cut + LZW + tramage Bayer.",
+  "Codecs/WebPEncoder.swift": "Encodage WebP : pilote cwebp, avec et sans perte.",
+  "Design/Theme.swift": "Système de design : couleurs sémantiques du système, typographie et échelle d'espacements.",
+  "Design/Components.swift": "Composants partagés : sections, boutons, zones de dépôt, listes de fichiers, progression et tableau de référence des codecs.",
+  "Design/Controls.swift": "Contrôles de formulaire : lignes de champ, saisies numériques, curseurs, interrupteurs, sélecteurs et formulaires de paramètres.",
+  "Features/ToolRegistry.swift": "Registre des outils : point d'entrée unique des 53 outils.",
+  "Features/Video/VideoSupport.swift": "Logique partagée des outils vidéo : paramètres d'encodage, traitement géométrique et déduction du conteneur.",
+  "Features/Video/VideoTools.swift": "13 outils vidéo : conversion, compression, extraction, fusion, concaténation, pochette, découpage, transformation, vitesse, filigrane, modification du hachage, nettoyage des métadonnées et résolution.",
+  "Features/Video/VideoFrames.swift": "5 outils de frames : capture d'écran, export de frames, conversion en GIF, séquence d'images en vidéo et images en vidéo.",
+  "Features/Video/TextRenderer.swift": "Rendu du filigrane texte : CoreText produit un PNG transparent pour la composition par overlay.",
+  "Features/Image/ImageSupport.swift": "Cœur image : encodage/décodage, redimensionnement, recadrage, transformations, filigranes et assemblage.",
+  "Features/Image/ImageTools.swift": "7 outils image : conversion, compression, dimensions, recadrage et rotation, filigrane, assemblage et coins arrondis avec ombre.",
+  "Features/Image/ImageExtra.swift": "Images en PDF, PDF en images, renommage par lots et codes QR.",
+  "Features/Image/GifBuilder.swift": "L'outil de conversion d'images en GIF et son modèle de recette.",
+  "Features/Image/GifBuilderView.swift": "Éditeur du constructeur GIF : séquence de frames, ordre, transitions et aperçu en direct.",
+  "Features/Document/DocumentSupport.swift": "Lecture et écriture de documents : NSAttributedString / PDFKit / pagination CoreText.",
+  "Features/Document/DocumentTools.swift": "17 outils document : conversion entre formats, fusion, découpage, compression et chiffrement de PDF, OCR.",
+  "Features/Document/MarkdownConverter.swift": "Convertisseur Markdown bidirectionnel écrit maison.",
+  "Features/Archive/ArchiveTools.swift": "Compression et extraction : volumes fractionnés, mots de passe et AES-256.",
+  "Features/Inspect/InspectTools.swift": "Définition des trois outils à affichage automatique, plus l'inspecteur de contenu d'archive.",
+  "Features/Inspect/HashInspector.swift": "Inspecteur de sommes de contrôle.",
+  "Features/Inspect/ImageInspector.swift": "Inspecteur d'informations d'image : fichier, dimensions, couleur, EXIF, GPS et couleurs dominantes."
+ },
+ "chrome": {
+  "theme.dark": "Sombre",
+  "theme.dim": "Sombre adouci",
+  "theme.light": "Clair",
+  "theme.sepia": "Sépia",
+  "toolbar.fontDown.help": "Réduire la taille du texte (-)",
+  "toolbar.fontDown": "Réduire la taille du texte",
+  "toolbar.fontUp.help": "Augmenter la taille du texte (+)",
+  "toolbar.fontUp": "Augmenter la taille du texte",
+  "nav.filter.placeholder": "Filtrer (⌘K)",
+  "nav.overview": "Vue d'ensemble",
+  "nav.quickstart": "Démarrage rapide",
+  "nav.architecture": "Architecture",
+  "nav.source": "Code source",
+  "nav.dependencies": "Dépendances",
+  "nav.testing": "Tests et vérification",
+  "code.collapse": "Replier",
+  "code.expand": "Tout déplier ",
+  "code.linesSuffix": " lignes",
+  "code.copy": "Copier",
+  "code.copied": "Copié",
+  "code.copyFailed": "Échec de la copie",
+  "code.copyAll": "Copier tout le code",
+  "drop.anyFile": "Tout fichier",
+  "drop.automatic": "(automatique, sans bouton)",
+  "drop.multiple": "(sélection multiple)",
+  "drop.single": "(fichier unique)",
+  "param.toggle": "Interrupteur",
+  "param.none": "Cet outil n'a aucun paramètre réglable.",
+  "preset.manual": "Régler à la main tous les paramètres ci-dessous",
+  "section.parameters": "Paramètres",
+  "section.source": "Code source",
+  "table.name": "Nom",
+  "table.type": "Type",
+  "table.values": "Valeurs",
+  "table.default": "Défaut",
+  "table.description": "Description",
+  "table.category": "Catégorie",
+  "table.interaction": "Interaction",
+  "stat.toolsUnit": "outils",
+  "table.component": "Composant",
+  "table.purpose": "Usage",
+  "table.whyNeeded": "Pourquoi c'est nécessaire",
+  "table.whyNotOurs": "Pourquoi ne pas l'écrire nous-mêmes",
+  "table.bundled": "Embarqué dans le DMG",
+  "stat.tools": " outils",
+  "stat.files": " fichiers source",
+  "stat.swiftLines": " lignes de Swift",
+  "stat.params": " paramètres réglables",
+  "stat.presets": " modèles de preset",
+  "stat.presetsShort": "Presets",
+  "stat.linesShort": "Lignes",
+  "stat.toolsShort": "Outils ",
+  "stat.paramsShort": "Paramètres ",
+  "code.buildCommands": "./build.sh          # Compile et empaquette FormatForge.app (architecture locale uniquement)\n./test.sh           # Vérification fonctionnelle de bout en bout (91 contrôles)\n./make-dmg.sh       # Construit un binaire universel et l'empaquette en DMG\n./run.sh            # Lance l'application",
+  "note.firstLaunch": "Premier lancement :",
+  "note.knownTradeoff": "Un compromis connu :",
+  "dep.ffmpegBundled": "Embarqué (liaison statique, binaire universel)",
+  "dep.sevenZipBundled": "Embarqué (statique arm64)",
+  "dep.cwebpBundled": "Embarqué (avec 8 bibliothèques dynamiques)",
+  "dep.system": "Fourni par le système",
+  "dep.ffmpegUse": "Toutes les fonctions vidéo",
+  "dep.sevenZipUse": "Archives chiffrées et fractionnées",
+  "dep.cwebpUse": "Sortie WebP",
+  "dep.textutilUse": "Repli pour la conversion de documents",
+  "code.treeStructure": "Arborescence",
+  "source.intro": "Le rôle de chaque fichier source, avec son code complet. C'est une présentation fichier par fichier de tout le projet.",
+  "code.lineSuffix": "lignes",
+  "param.noneHtml": "<p class='tool-id'>Cet outil n'a aucun paramètre réglable.</p>",
+  "preset.manualHtml": "<em>Régler à la main tous les paramètres ci-dessous</em>",
+  "section.parametersHtml": "<h4>Paramètres</h4>",
+  "section.sourceHtml": "<h4>Code source</h4>",
+  "source.introHtml": "<p>Le rôle de chaque fichier source, avec son code complet. C'est une présentation fichier par fichier de tout le projet.</p>",
+  "error.noRegistry": "build/registry.json est absent — lancez d'abord ./Tools/build-tutorial.sh, qui exporte le registre puis appelle ce script.",
+  "log.generated": "✓ Tutoriel généré : ",
+  "log.tools": "    outils : ",
+  "log.files": ", fichiers source : ",
+  "log.countSuffix": "",
+  "log.totalSize": "    taille totale : ",
+  "log.mb": " Mo",
+  "nav.top": "Début",
+  "param.range": "Plage {min}–{max}, pas {step}",
+  "param.placeholder": "Texte indicatif {value}",
+  "nav.articles": "Comment ça marche",
+  "table.accepts": "Formats acceptés",
+  "table.buttonLabel": "Libellé du bouton",
+  "table.minimumInputs": "Entrées minimum",
+  "table.filesSuffix": " fichier(s)",
+  "page.title": "FormatForge — le tutoriel de développement complet",
+  "page.subtitle": "Tutoriel de développement complet",
+  "page.lede": "L'analyse complète de l'implémentation d'un convertisseur de formats natif pour macOS : {tools} outils, {lines} lignes de Swift, zéro dépendance tierce. Le principe et le code source de chaque fonction sont ici.",
+  "page.description": "Le tutoriel d'implémentation complet du convertisseur de formats FormatForge pour macOS, avec le principe et le code source des {tools} outils.",
+  "page.footer": "Tutoriel de développement FormatForge · généré depuis le code source du projet, donc toujours synchronisé avec l'implémentation.",
+  "page.footerDetail": "Chaque extrait de code du document est lu directement dans <code>Sources/</code>, et les paramètres comme les presets viennent du <code>ToolRegistry</code> à l'exécution : le document ne peut donc pas se désynchroniser du code.",
+  "articles.intro": "Chaque section ci-dessous explique <b>pourquoi les choses sont faites ainsi</b> : les compromis de conception, les pistes écartées, les pièges réellement rencontrés et le code réel. Les fichiers longs sont repliés par défaut — cliquez pour les déplier.",
+  "articles.principle": "L'idée directrice",
+  "articles.why": "Pourquoi c'est fait ainsi",
+  "articles.diagrams": "Schéma",
+  "articles.steps": "Étapes d'implémentation",
+  "articles.pitfalls": "Pièges rencontrés",
+  "articles.cause": "Cause : ",
+  "articles.fix": "Solution : ",
+  "articles.reading": "Où lire le code",
+  "section.howItWorks": "Comment ça marche",
+  "section.notes": "Remarques complémentaires",
+  "section.presets": "Modèles de preset",
+  "tools.heading": "Tous les outils en détail",
+  "tools.intro": "Chaque outil présente son usage, son tableau de paramètres, ses modèles de preset et le code source correspondant.",
+  "badge.automatic": "Affichage dès le dépôt",
+  "badge.inPlace": "Modification sur place",
+  "badge.needsFFmpeg": "Nécessite ffmpeg",
+  "badge.needs7z": "Nécessite 7z",
+  "nav.appendix": "Annexe",
+  "source.lineRange": "{file}, lignes {start}–{end}",
+  "code.tree": "Sources/\n├── App/          Point d'entrée, état global, fenêtre, barre latérale, inspecteur, réglages\n├── Design/       Couleurs, typographie, composants, contrôles de paramètres\n├── Core/         Processus, file de tâches, modèle d'outil, sondage média, réglages, estimation, hachage, journal\n├── Codecs/       Encodeur GIF (LZW + quantification median cut), encodeur WebP\n└── Features/\n    ├── Video/    18 outils vidéo + rendu de texte\n    ├── Image/    10 outils image + constructeur GIF\n    ├── Document/ 17 outils document + convertisseur Markdown bidirectionnel\n    ├── Archive/  Compresser, extraire\n    ├── Inspect/  3 outils à affichage automatique\n    └── ToolRegistry.swift   le registre de tous les outils",
+  "code.buildCommands.title": "Commandes de build",
+  "table.headerRow": "<table><thead><tr><th>Paramètre</th><th>Nom</th><th>Type</th><th>Valeurs</th><th>Défaut</th><th>Description</th></tr></thead><tbody>",
+  "source.fileMeta": "{rel} · {lines} lignes"
+ },
+ "blocks": {
+  "overview": "\n<section id=\"overview\">\n<h2>Vue d'ensemble du projet</h2>\n<p>FormatForge est un convertisseur de formats natif pour macOS, écrit en SwiftUI, <b>sans aucune\ndépendance à un paquet Swift tiers</b>. Tout le traitement se fait en local, aucune donnée n'est envoyée.</p>\n\n<div class=\"stats\">\n  <div class=\"stat\"><b>{len(tools)}</b><span>outils</span></div>\n  <div class=\"stat\"><b>{len(swift_files)}</b><span>fichiers source</span></div>\n  <div class=\"stat\"><b>{total_lines:,}</b><span>lignes de Swift</span></div>\n  <div class=\"stat\"><b>{total_params}</b><span>paramètres réglables</span></div>\n  <div class=\"stat\"><b>{total_presets}</b><span>modèles de preset</span></div>\n</div>\n\n<h3>Trois catégories d'outils, trois interactions</h3>\n<p>C'est la décision de conception la plus importante du projet. Des fonctions de nature différente ne devraient pas partager le même flux d'interaction :</p>\n<table>\n<thead><tr><th>Catégorie</th><th>Interaction</th><th>Outils</th></tr></thead>\n<tbody>\n<tr><td><b>Inspection</b></td><td>On dépose un fichier et le résultat s'affiche aussitôt ; <b>aucun bouton</b>, pas de file de tâches, pas de dossier de sauvegarde</td>\n<td>{\", \".join(html.escape(t[\"name\"]) for t in tools if t[\"isInspection\"])}</td></tr>\n<tr><td><b>Conversion</b></td><td>Choisir un preset → régler les paramètres → cliquer sur le bouton → la file d'arrière-plan exécute</td>\n<td>{sum(1 for t in tools if t[\"resultKind\"] == \"files\")} outils</td></tr>\n<tr><td><b>Modification sur place</b></td><td>Agit directement sur le fichier, sans produire de nouveau fichier</td>\n<td>{\", \".join(html.escape(t[\"name\"]) for t in tools if t[\"resultKind\"] == \"inPlace\")}</td></tr>\n</tbody>\n</table>\n\n<h3>Chaque outil possède sa propre session</h3>\n<p>Les 53 outils détiennent chacun leurs entrées, paramètres, presets et dossier de sortie (<code>ToolSession</code>).\nChanger d'outil ne change que l'objet affiché, on peut donc <b>travailler sur plusieurs outils en même temps</b> —\nlancer une longue tâche dans « Compression vidéo », par exemple, puis passer à « Vérification de fichier » pour calculer le hachage d'un autre fichier.</p>\n</section>\n",
+  "quickstart": "\n<section id=\"quickstart\">\n<h2>Démarrage rapide</h2>\n\n<h3>Utilisation directe (recommandée)</h3>\n<p>Ouvrez le DMG et glissez <code>FormatForge.app</code> dans « Applications ». L'application embarque déjà\nffmpeg, ffprobe, 7z et cwebp : <b>aucun besoin d'installer Homebrew ni quoi que ce soit d'autre</b>.</p>\n<div class=\"note\"><b>Premier lancement :</b> l'application n'est pas signée par un développeur Apple. Si macOS la bloque,\nfaites un clic droit sur l'icône → choisissez « Ouvrir » → puis cliquez de nouveau sur « Ouvrir » dans la boîte de dialogue. Le double-clic fonctionnera ensuite normalement.</div>\n\n<h3>Compiler depuis les sources</h3>\n",
+  "dependencies": "\n<h3>Dépendances</h3>\n<table>\n<thead><tr><th>Composant</th><th>Usage</th><th>Embarqué dans le DMG</th></tr></thead>\n<tbody>\n<tr><td><code>ffmpeg</code> / <code>ffprobe</code></td><td>Toutes les fonctions vidéo</td>\n<td>✅ Embarqué (liaison statique, binaire universel)</td></tr>\n<tr><td><code>7z</code></td><td>Archives chiffrées et fractionnées</td><td>✅ Embarqué (statique arm64)</td></tr>\n<tr><td><code>cwebp</code></td><td>Sortie WebP</td><td>✅ Embarqué (avec 8 bibliothèques dynamiques)</td></tr>\n<tr><td><code>textutil</code></td><td>Repli pour la conversion de documents</td><td>Fourni par le système</td></tr>\n</tbody>\n</table>\n<p>Si ces outils manquent lors d'une compilation depuis les sources, installez-les avec <code>brew install ffmpeg p7zip webp</code> ;\nl'application privilégie les versions embarquées et ne retombe sur l'installation système que si elle ne les trouve pas.</p>\n</section>\n",
+  "architecture": "\n<section id=\"architecture\">\n<h2>Vue d'ensemble de l'architecture</h2>\n<p>Le code se répartit en quatre couches, et les dépendances ne vont que dans un sens : <b>Features → Core → Codecs / Design → App</b>.</p>\n",
+  "dataflow": "\n<h3>Le flux de données complet d'une conversion</h3>\n<pre class=\"code text\" style=\"background:var(--bg-code);border:1px solid var(--line);\nborder-radius:10px;padding:16px;overflow-x:auto\"><code>L'utilisateur dépose un fichier\n   │\n   ▼\nToolSession.inputs          ← conservé pour chaque outil\n   │\n   ├─► Outils d'inspection ──► FileInspector.inspect() ──► InspectionReport ──► affichage en ligne\n   │                                                                             (aucun bouton)\n   │\n   └─► Outils de conversion\n         │\n         ▼\n   AppState.run()\n         │  résolution du dossier de sortie (alerte possible)\n         ▼\n   JobQueue.enqueue(tool, context, estimate)\n         │\n         ▼\n   Création du Job ──► JobLogger ──► panneau de journal\n         │\n         ▼\n   tool.run(context)          ← implémentation propre à chaque outil\n         │\n         ├─► FFmpeg.execute() ──► ProcessRunner.run()\n         │                            │\n         │                            ├─► stdout: -progress pipe:1 ──► pourcentage\n         │                            └─► stderr: sortie du journal\n         ▼\n   FileIO.commit()            ← gestion des collisions de noms\n         │\n         ▼\n   JobState.finished([URL])   ← totalise les tailles, calcule l'économie, écrit le journal</code></pre>\n</section>\n",
+  "deps": "\n<section id=\"deps\">\n<h3>Note sur les dépendances</h3>\n<p>L'application elle-même n'a <b>aucune dépendance Swift tierce</b>. Toutes les capacités d'image, de document, de hachage et de compression viennent des frameworks système :\nFoundation, SwiftUI, AppKit, AVFoundation, ImageIO, CoreGraphics, CoreText, PDFKit,\nVision, CryptoKit, Compression, UniformTypeIdentifiers.</p>\n<p>Seuls l'encodage vidéo, les archives 7z chiffrées et fractionnées, et l'encodage WebP nécessitent des exécutables externes, tous embarqués dans le DMG.</p>\n<table>\n<thead><tr><th>Outil</th><th>Pourquoi il est nécessaire</th><th>Pourquoi ne pas l'écrire nous-mêmes</th></tr></thead>\n<tbody>\n<tr><td>ffmpeg</td><td>Encodage et décodage vidéo, filtres, multiplexage</td>\n<td>Couvre des centaines de codecs et l'accélération matérielle ; le réimplémenter n'est pas réaliste</td></tr>\n<tr><td>7z</td><td>Archives chiffrées AES-256 et fractionnées</td>\n<td>Doit rester parfaitement compatible avec les formats d'archive existants</td></tr>\n<tr><td>cwebp</td><td>Encodage WebP avec et sans perte</td>\n<td>L'ImageIO de macOS sait lire le WebP, mais pas l'écrire</td></tr>\n</tbody>\n</table>\n<div class=\"note warn\"><b>Un compromis connu :</b> la version embarquée de 7z est en arm64. Sur un Mac Intel, il faudra installer\n<code>p7zip</code> soi-même pour les archives chiffrées et fractionnées ; le reste n'est pas affecté.</div>\n</section>\n\n<section id=\"testing\">\n<h3>Tests et vérification</h3>\n<p>Le projet fournit <code>test.sh</code>, qui exécute 91 contrôles sur de vrais fichiers. Il vérifie le <b>comportement</b>, pas la simple existence des fichiers :</p>\n<ul>\n<li>Après modification du MD5, le nombre de frames est rigoureusement identique — preuve que l'image n'a pas été réencodée</li>\n<li>Une archive fractionnée doit échouer avec un mauvais mot de passe et réussir avec le bon</li>\n<li>Une vidéo compressée doit être plus légère (réduction mesurée : 78 %)</li>\n<li>Le GIF doit être une animation multi-images</li>\n<li>Les trois modes d'ajustement doivent produire des géométries différentes, pour que les options ne restent pas décoratives</li>\n<li>Les noms de fichiers chinois (avec espaces et parenthèses pleine chasse) doivent être conservés intacts</li>\n<li>Les vidéos corrompues et les fichiers vides doivent être refusés clairement</li>\n<li>Les cinq sommes de contrôle sont comparées une à une avec <code>md5</code> / <code>shasum</code> / <code>zlib.crc32</code> du système</li>\n<li>Déposer un fichier doit produire un résultat automatiquement, sans clic</li>\n</ul>\n</section>\n"
+ }
+}

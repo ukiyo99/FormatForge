@@ -1,0 +1,1631 @@
+{
+ "articles": {
+  "arch": {
+   "principle": "整个应用建立在两个判断上：<b>每个工具必须拥有独立的工作状态</b>，以及<b>不同性质的功能不应该共用同一套交互流程</b>。第一条决定了数据结构，第二条决定了界面结构。",
+   "why": [
+    [
+     "为什么每个工具要独立状态",
+     "最初的实现把所有工具的状态放在一个全局对象里：一份 <code>inputs</code>、一份 <code>parameterValues</code>。结果是切换工具会清空已选文件，而且无法同时准备两个任务。更糟的是，一个长任务会占住整个界面——因为所有工具共用同一个执行入口。改成 <code>ToolSession</code> 之后，53 个工具各自持有输入、参数、预设与输出目录，切换工具只是切换显示对象。"
+    ],
+    [
+     "为什么分三类而不是一套流程",
+     "「文件校验值」不需要输出目录、不需要进度条、不需要按钮——文件一拖进去结果就该出现。但如果强行套用「配置 → 点按钮 → 进队列」的流程，用户就得先点一下才能看到结果，还会被问「保存到哪里」（尽管根本不产生文件）。这不是实现问题，是抽象错了。所以按<b>是否产生文件</b>把工具分成三类，各用各的交互。"
+    ],
+    [
+     "为什么不用第三方依赖",
+     "图像、文档、哈希、压缩都能用系统框架完成：ImageIO、CoreGraphics、CoreText、PDFKit、Vision、CryptoKit、Compression。只有视频编解码、7z 加密分卷、WebP 编码必须依赖外部工具。少一层依赖就少一类构建失败。"
+    ],
+    [
+     "为什么参数用数据描述而不是各自写界面",
+     "每个工具声明自己的参数列表（类型、范围、默认值、显示条件），界面由声明自动生成。53 个工具、189 个参数，如果每个都手写表单，加一个参数就要改三处。现在新增工具只需要写一个 <code>Tool</code> 结构体。"
+    ]
+   ],
+   "steps": [
+    [
+     "应用启动，构建全部会话",
+     "<code>AppState.init</code> 遍历 <code>ToolRegistry.all</code>，为 53 个工具各创建一个 <code>ToolSession</code>。这一步是 O(53) 的轻量操作，只分配结构体，不做任何 I/O，所以启动不会有延迟。"
+    ],
+    [
+     "用户拖入文件",
+     "拖拽落到 <code>DropZone</code>，解析成 URL 数组，交给 <code>AppState.addInputs</code>。它会做两件事：过滤掉该工具不支持的扩展名，然后写入当前会话。"
+    ],
+    [
+     "分流：检查类还是转换类",
+     "<code>AppState</code> 检查 <code>selectedTool.inspector</code> 是否存在。存在就走 <code>runInspectionIfNeeded()</code>（自动计算、内联显示）；不存在就等用户点按钮。这是整个架构的分水岭。"
+    ],
+    [
+     "转换类：入队执行",
+     "点击按钮 → <code>startJob()</code> → 解析输出目录 → <code>JobQueue.enqueue()</code>。队列维护一个待执行列表和有界并发数，任务在 <code>Task.detached</code> 里跑，不占用主线程。"
+    ],
+    [
+     "结果汇总",
+     "任务结束后统计输出体积、计算相对源文件的节省比例、写入日志，然后把 <code>JobState</code> 推回主线程更新界面。"
+    ]
+   ],
+   "pitfalls": [
+    [
+     "切换工具后已选文件消失",
+     "所有工具共用一份 <code>inputs</code>，<code>select()</code> 时被清空。",
+     "引入 <code>ToolSession</code>，每个工具独立保存，切换时只做显示切换。"
+    ],
+    [
+     "长时间任务期间无法操作其他功能",
+     "全局只有一个执行入口，界面被当前任务占用。",
+     "任务进后台队列，界面与队列解耦；侧边栏显示各工具已暂存的文件数，方便在多个工具间来回操作。"
+    ],
+    [
+     "检查类工具点了按钮反而要求保存文件",
+     "<code>JobQueue</code> 把「返回空数组」一律当成失败，且输出位置设置对所有工具生效。",
+     "新增 <code>ToolResultKind</code>（files / report / inPlace），报告型工具不显示输出设置、不入队、直接内联显示结果。"
+    ]
+   ],
+   "diagrams": [
+    [
+     "数据流总览",
+     "\n<b>用户拖入文件</b>\n      │\n      ▼\n<s>ToolSession</s> ── 每个工具独立持有 inputs / values / presets\n      │\n      ├──► <i>检查类</i> ──► FileInspector.inspect()\n      │                        │\n      │                        └──► <i>InspectionReport</i> ──► 内联渲染\n      │                             <u>没有按钮 · 不进队列 · 不问保存</u>\n      │\n      └──► <b>转换类</b>\n              │\n              ▼\n        AppState.run() ──► 解析输出目录（askEveryTime 时弹窗）\n              │\n              ▼\n        <s>JobQueue.enqueue()</s>\n              │\n              ▼\n        Job ──► JobLogger ──► 日志面板\n              │\n              ▼\n        tool.run(context)\n              │\n              ├──► FFmpeg.execute() ──► ProcessRunner\n              │         │\n              │         ├── stdout: -progress pipe:1 ──► 进度百分比\n              │         └── stderr: ──► 日志\n              ▼\n        FileIO.commit() ──► 处理同名冲突\n              │\n              ▼\n        <i>JobState.finished([URL])</i> ──► 体积统计 ──► 界面"
+    ]
+   ],
+   "reading": [
+    [
+     "App/AppState.swift",
+     "看 sessions 字典与 select()：会话如何创建、如何分流检查与转换"
+    ],
+    [
+     "Core/ToolSession.swift",
+     "看 init：预设如何在构造时应用；看 addInputs：扩展名如何过滤"
+    ],
+    [
+     "Core/Tool.swift",
+     "看 Tool 结构体：一个工具需要声明哪些东西"
+    ]
+   ]
+  },
+  "pipeline": {
+   "principle": "任务管线的难点不是「调用命令行」，而是三件事：<b>并发但不失控</b>、<b>可随时取消</b>、<b>进度能实时回到界面</b>。这三件事决定了为什么要用 <code>ProcessHandle</code> 和 actor 隔离。",
+   "why": [
+    [
+     "为什么用 Process 而不是 shell",
+     "把参数拼成字符串交给 <code>/bin/sh</code> 会带来转义问题——文件名里的空格、引号、中文、括号都可能出错。直接传参数数组给 <code>Process</code> 由系统处理，同时避免了 shell 注入。"
+    ],
+    [
+     "为什么要 ProcessHandle",
+     "<code>Process</code> 本身不支持优雅取消。要取消一个正在跑的 ffmpeg，必须持有它的引用并调用 <code>terminate()</code>。<code>ProcessHandle</code> 用锁保护这个引用，解决「进程还没启动就被取消」的竞态。"
+    ],
+    [
+     "为什么进度要跨线程回传",
+     "ffmpeg 的进度从管道读取，发生在后台线程；界面必须在主线程更新。直接跨线程改状态会崩，所以 <code>ProgressReporter</code> 把回调包成 <code>@Sendable</code>，由 <code>JobQueue</code> 转投到 MainActor。"
+    ],
+    [
+     "为什么日志要限长",
+     "一个 2 小时视频的 ffmpeg 输出可能有几十万行。<code>JobLogger</code> 把缓冲限制在 600 条（界面 800 条），超出丢弃最旧的，避免长时间任务吃光内存。"
+    ]
+   ],
+   "steps": [
+    [
+     "构建参数",
+     "工具实现负责把参数翻译成命令行数组。这一步是纯函数，不产生副作用，所以容易测试。"
+    ],
+    [
+     "启动进程",
+     "<code>ProcessRunner.run</code> 定位可执行文件（优先内嵌）、设置环境变量、接好 stdout/stderr 管道，然后 <code>process.run()</code>。"
+    ],
+    [
+     "流式读取",
+     "管道用 <code>readabilityHandler</code> 增量读取，<code>LineCollector</code> 按换行切分并保证线程安全。ffmpeg 的 <code>-progress pipe:1</code> 每秒输出多行 <code>key=value</code>。"
+    ],
+    [
+     "解析进度",
+     "<code>out_time_us</code> 除以总时长得到百分比。这里有个坑：某些构建里字段叫 <code>out_time_ms</code> 但单位仍是微秒。"
+    ],
+    [
+     "等待结束",
+     "用 <code>withCheckedContinuation</code> 把 <code>terminationHandler</code> 桥接成 async，避免阻塞线程。"
+    ],
+    [
+     "提交结果",
+     "<code>FileIO.commit</code> 按冲突策略决定目标路径（重命名 / 覆盖 / 跳过），再用 <code>moveItem</code> 原子替换。"
+    ]
+   ],
+   "pitfalls": [
+    [
+     "任务取消后进程还在跑",
+     "<code>ProcessHandle</code> 在进程启动前就被标记取消时，启动后没有检查状态。",
+     "<code>attach()</code> 时若发现已取消，立即 <code>terminate()</code>。"
+    ],
+    [
+     "进度条卡在 0% 直到结束",
+     "ffmpeg 的进度输出在 stdout，但一开始把 stderr 也接到了同一个 sink，导致解析器读到的是日志而不是进度。",
+     "stdout 与 stderr 分开处理：进度来自 stdout，日志来自 stderr。"
+    ],
+    [
+     "临时文件残留",
+     "写入过程中的临时文件在失败路径上没有清理。",
+     "所有临时文件用 <code>defer { FileIO.removeQuietly(temp) }</code> 兜底。"
+    ]
+   ],
+   "diagrams": [
+    [
+     "一个任务的生命周期",
+     "\n  enqueue                pump                  detached Task\n     │                     │                         │\n     ▼                     ▼                         ▼\n <s>queued</s> ──► <b>running</b> ──► tool.run(context) ──► FFmpeg.execute()\n     │                     │                         │\n     │                     │        ┌────────────────┴────────────────┐\n     │                     │        ▼                                 ▼\n     │                     │   stdout: out_time_us              stderr: 日志行\n     │                     │        │                                 │\n     │                     │        ▼                                 ▼\n     │                     │   ProgressReporter ──► MainActor    JobLogger\n     │                     │        │                                 │\n     │                     │        ▼                                 ▼\n     │                     │   进度条 / 百分比                    日志面板\n     │                     │\n     │                     ▼\n     └──────────► <i>finished / failed / cancelled / reported</i>\n                              │\n                              ▼\n                    体积统计 · 节省比例 · 耗时"
+    ],
+    [
+     "为什么 stdout 和 stderr 必须分开",
+     "\n   ffmpeg\n     ├── stdout ──► <i>-progress pipe:1</i>  ──► key=value 进度行   <u>要解析</u>\n     └── stderr ──► 编码器日志、警告、错误    <u>要展示</u>\n\n   如果混在一个管道里：\n     进度解析器会读到 \"frame= 120 fps=30 ...\"  → 解析失败\n     日志面板会刷满 \"out_time_us=4000000\"      → 噪音\n\n   结论：<b>两个管道，两个 sink，各走各的</b>"
+    ]
+   ],
+   "reading": [
+    [
+     "Core/JobQueue.swift",
+     "看 pump()：并发上限如何控制；看 Task.detached：状态如何回主线程"
+    ],
+    [
+     "Core/ProcessRunner.swift",
+     "看 locate()：为什么优先内嵌；看 run()：管道如何接"
+    ],
+    [
+     "Core/JobLog.swift",
+     "看 JobLogger：为什么要限长；看 JobLifecycle：开始/结束都记录了什么"
+    ]
+   ]
+  },
+  "ffmpeg": {
+   "principle": "调用 ffmpeg 本身很简单，难在<b>参数组合的正确性</b>——编码器、容器、像素格式、滤镜之间有大量隐含约束，组合错了要么报错，要么产出别的播放器打不开的文件。",
+   "why": [
+    [
+     "为什么参数要分三层组装",
+     "输入选项（<code>-i</code> 之前）、滤镜、输出选项（<code>-i</code> 之后）顺序不能乱。把这三层分开构建，避免「选项放错位置」这类错误——比如 <code>-hwaccel</code> 是输入选项，放到输出侧会直接报错。"
+    ],
+    [
+     "为什么容器要跟编码器对齐",
+     "WebM 容器只接受 VP8/VP9/AV1，MP4 不接受 VP9 之外的很多组合。如果用户选了 H.264 又选了 WebM，必须自动纠正，否则 ffmpeg 报错。"
+    ],
+    [
+     "为什么有多个输入时要自己拼 -i",
+     "通用封装会默认加一个 <code>-i input</code>。拼接、水印、相册这类工具需要多个输入，如果封装再加一个，所有输入索引都会偏移——<code>-map 1:a</code> 会指到错误的流。这个 bug 实际发生过：视频拼接只输出了 3 秒而不是 6 秒。"
+    ],
+    [
+     "为什么文字水印不用 drawtext",
+     "本机 ffmpeg 没有编译 libfreetype，<code>drawtext</code> 滤镜不存在。改用 CoreText 把文字渲染成透明 PNG，再用 <code>overlay</code> 合成——顺带获得了完整的中日韩字体支持和更好的抗锯齿。"
+    ],
+    [
+     "为什么 CRF 和硬件编码要分开处理",
+     "VideoToolbox 不支持 CRF，只接受 <code>-q:v</code> 的 0–100 质量标度。把 CRF 映射过去只是近似，所以硬件编码的默认值是关闭——它更快，但同画质下文件明显更大。"
+    ]
+   ],
+   "steps": [
+    [
+     "选编码器",
+     "<code>FFmpeg.videoArgs</code> 根据编码器与是否启用硬件加速，决定用 <code>libx264</code> 还是 <code>h264_videotoolbox</code>。"
+    ],
+    [
+     "组装画质参数",
+     "软件编码用 <code>-crf</code> + <code>-preset</code>；硬件编码用 <code>-q:v</code> 并把 CRF 反向映射到质量标度。"
+    ],
+    [
+     "叠加几何滤镜",
+     "缩放、帧率、适配方式合成一条 <code>-vf</code> 链。多个滤镜用逗号连接，注意逗号在滤镜表达式里要转义成 <code>\\,</code>。"
+    ],
+    [
+     "拼装输入侧",
+     "多输入工具提供自己的 <code>inputArguments</code>，单输入工具用默认的 <code>[\"-i\", path]</code>。"
+    ],
+    [
+     "执行并解析",
+     "<code>-progress pipe:1</code> 让进度走 stdout，与日志（stderr）分离。"
+    ]
+   ],
+   "pitfalls": [
+    [
+     "拼接后时长只有一半",
+     "辅助函数无条件添加 <code>-i input</code>，而拼接用的是 <code>-f concat -i list.txt</code>，于是列表成了第二个输入，实际解码的是列表文件本身。",
+     "让工具提供完整的输入前缀 <code>inputArguments</code>，辅助函数不再自行添加。"
+    ],
+    [
+     "截图报错 'Requested output format png is not known'",
+     "代码对图片输出也强制加了 <code>-f png</code>，但 PNG 是编码器名不是封装器名。",
+     "<code>formatHint</code> 对图片类扩展名返回 nil，让 ffmpeg 按扩展名自动选 image2 封装器。"
+    ],
+    [
+     "水印报错 'No such filter: drawtext'",
+     "本机 ffmpeg 未编译 libfreetype。",
+     "改用 CoreText 渲染文字为 PNG，再用 overlay 合成。"
+    ],
+    [
+     "硬件截图报错 'Option hwaccel cannot be applied to output url'",
+     "<code>-hwaccel</code> 是输入选项，被放到了输出参数里。",
+     "把它并入 <code>inputArguments</code>，放在 <code>-i</code> 之前。"
+    ]
+   ],
+   "diagrams": [
+    [
+     "参数三层的正确顺序",
+     "\n  ffmpeg  <u>[输入选项]</u>  -i 输入  <s>[滤镜]</s>  <b>[输出选项]</b>  输出文件\n            │                │            │              │\n            │                │            │              └─ -c:v -crf -c:a -movflags\n            │                │            └─ -vf / -filter_complex\n            │                └─ 一个或多个 -i\n            └─ -hwaccel videotoolbox · -ss · -t\n\n  <i>放错位置 → ffmpeg 直接报错，且错误信息往往指向文件而不是选项</i>"
+    ],
+    [
+     "容器与编码器的合法组合",
+     "\n            ┌──────────┬───────┬───────┬──────┬──────┬────────┐\n            │          │ H.264 │ H.265 │ VP9  │ AV1  │ ProRes │\n            ├──────────┼───────┼───────┼──────┼──────┼────────┤\n            │ MP4      │  <i>✓</i>   │  <i>✓</i>   │  ✗   │  <i>✓</i>  │   ✗    │\n            │ MOV      │  <i>✓</i>   │  <i>✓</i>   │  ✗   │  ✗   │  <i>✓</i>    │\n            │ MKV      │  <i>✓</i>   │  <i>✓</i>   │  <i>✓</i>  │  <i>✓</i>  │  <i>✓</i>    │\n            │ WebM     │  ✗   │  ✗   │  <i>✓</i>  │  <i>✓</i>  │   ✗    │\n            └──────────┴───────┴───────┴──────┴──────┴────────┘\n            <u>用户选了非法组合时自动纠正，而不是让它失败</u>"
+    ]
+   ],
+   "reading": [
+    [
+     "Core/FFmpeg.swift",
+     "看 videoArgs：软件/硬件两条分支；看 progressHandler：进度如何解析"
+    ],
+    [
+     "Features/Video/VideoSupport.swift",
+     "看 encode：inputArguments 参数为什么存在"
+    ]
+   ]
+  },
+  "gif": {
+   "principle": "macOS 的 ImageIO <b>只能读 GIF 不能写</b>，所以 GIF 输出完全自己实现：色彩量化 → 索引映射 → LZW 压缩 → 帧合成。这段代码是项目里最接近「从零实现一个文件格式」的部分。",
+   "why": [
+    [
+     "为什么需要色彩量化",
+     "GIF 每帧最多 256 色，而照片有上万种颜色。必须把颜色收敛到一个调色板。用中位切分法：把所有颜色放进一个盒子，沿最长的轴从中位切开，反复直到盒子数等于目标颜色数。每个盒子取加权平均色，就是调色板的一个条目。"
+    ],
+    [
+     "为什么用 15 位直方图而不是完整 RGB",
+     "完整 24 位颜色空间有 1600 万种可能，直方图数组会占 64 MB。把每个通道截到 5 位（32 级）得到 32768 个桶，只占 128 KB，而肉眼几乎看不出区别。"
+    ],
+    [
+     "为什么要有查找表",
+     "每帧有几万到几十万像素，每个像素都要找最近的调色板颜色。如果每像素都遍历 256 个调色板条目，一张 480×270 的帧就要 3300 万次距离计算。预计算一张 32768 项的查找表（15 位色 → 调色板索引），之后每像素只需一次数组访问。"
+    ],
+    [
+     "为什么自己写 LZW",
+     "GIF 用的是可变码长 LZW，与 zip 的 deflate 完全不同。系统没有现成实现，而且需要精确控制码长增长与字典重置时机。"
+    ],
+    [
+     "为什么转场要自己合成像素",
+     "ffmpeg 的 xfade 只能处理视频流，而多图转 GIF 需要逐帧控制时长和转场。直接操作 RGBA 缓冲更灵活：淡化就是线性插值，滑动就是坐标偏移，擦除就是逐列判断，圆形展开就是半径判断。"
+    ]
+   ],
+   "steps": [
+    [
+     "解码与画布归一化",
+     "每张图按适配方式（完整显示 / 裁剪填满 / 拉伸）渲染到统一尺寸的 RGBA 画布。尺寸由第一张图的比例决定。"
+    ],
+    [
+     "构建转场帧",
+     "在相邻两帧之间插入若干过渡帧。淡化为 <code>a·(1-t) + b·t</code>；滑动按 x 坐标取源像素；圆形展开比较到中心的距离。"
+    ],
+    [
+     "全局调色板",
+     "从所有帧均匀采样约 22 万个像素，做一次中位切分，得到整段动画共用的调色板——比逐帧调色板体积小得多。"
+    ],
+    [
+     "索引映射",
+     "用查找表把每个像素映射成调色板索引，配合可选的 Bayer 抖动打散色带。"
+    ],
+    [
+     "LZW 编码",
+     "按 GIF 规则：先输出清除码，然后逐像素扩展前缀，码长在字典增长到 2^n 时提升，到 4096 时重置。"
+    ],
+    [
+     "写出 89a 结构",
+     "文件头 → 逻辑屏幕描述符 → 全局调色板 → Netscape 循环扩展 → 每帧（图形控制扩展 + 图像描述符 + LZW 数据块）→ 结束符。"
+    ]
+   ],
+   "pitfalls": [
+    [
+     "量化后的图片出现明显色带",
+     "直接取最近色，在渐变区域会产生条带。",
+     "加入 Bayer 有序抖动：在查表前给每个通道叠加一个基于 4×4 矩阵的微小偏移，让相邻像素落到不同调色板条目上，人眼会把它混成平滑过渡。"
+    ],
+    [
+     "调色板偏色",
+     "最初用桶内颜色的简单平均，忽略了每个颜色出现的次数，结果罕见色与常见色权重相同。",
+     "改成按直方图计数加权平均。"
+    ],
+    [
+     "大图量化很慢",
+     "逐像素做 256 次距离计算。",
+     "预计算 32768 项查找表，把每像素成本降到一次数组访问。"
+    ]
+   ],
+   "diagrams": [
+    [
+     "GIF 编码流程",
+     "\n  <b>输入图片</b>（尺寸各异）\n        │\n        ▼\n  <s>画布归一化</s>  scale / crop / pad → 统一尺寸 RGBA\n        │\n        ▼\n  <s>转场帧合成</s>  淡化 · 滑动 · 擦除 · 圆形展开\n        │\n        ▼\n  <s>采样 + 中位切分</s>  → 全局调色板（≤256 色）\n        │\n        ▼\n  <s>查找表</s>  32768 项：15 位色 → 调色板索引\n        │\n        ▼\n  <s>索引映射 + Bayer 抖动</s>  → 每帧一个字节数组\n        │\n        ▼\n  <s>LZW</s>  可变码长 9→12 位，字典满 4096 重置\n        │\n        ▼\n  <b>GIF89a</b>  文件头 · 调色板 · 循环扩展 · 逐帧数据"
+    ],
+    [
+     "中位切分：一个盒子变两个",
+     "\n  初始：所有颜色在一个盒子里\n  ┌─────────────────────────────┐\n  │  R 范围 12 ─────────── 240  │\n  │  G 范围  8 ─────────── 201  │   找最长的轴（这里是 R）\n  │  B 范围 30 ─────────── 190  │\n  └─────────────────────────────┘\n                │\n                │  沿 R 轴按<b>加权中位数</b>切开\n                ▼\n  ┌──────────────┐   ┌──────────────┐\n  │ R 12 ── 120  │   │ R 121 ── 240 │\n  │ 取加权平均色 │   │ 取加权平均色 │\n  └──────────────┘   └──────────────┘\n        │                    │\n        └──────── 重复，直到盒子数 = 目标颜色数 ────────┘\n\n  <u>用加权中位数而不是中点：保证两半的像素数量接近</u>"
+    ]
+   ],
+   "reading": [
+    [
+     "Codecs/GifEncoder.swift",
+     "看 ColorQuantizer.quantize：中位切分；看 LzwEncoder.encode：码长增长"
+    ],
+    [
+     "Features/Image/GifBuilder.swift",
+     "看 run：从解码到写文件的完整流程"
+    ]
+   ]
+  },
+  "markdown": {
+   "principle": "不依赖 pandoc，自己实现 Markdown 与富文本的双向转换。正向解析相对容易，<b>反向转换才是难点</b>——要从字体特征反推 Markdown 语法。",
+   "why": [
+    [
+     "为什么正向解析要手写",
+     "Markdown 没有唯一规范，但常用语法很小：标题、列表、强调、代码、链接、引用、表格。手写解析器约 400 行，比引入 pandoc（几十 MB 的 Haskell 二进制）轻得多，而且能精确控制输出样式。"
+    ],
+    [
+     "为什么反向转换靠字体特征",
+     "从 Word 读进来的是 <code>NSAttributedString</code>，里面没有「这是一个标题」的标记，只有字体信息。所以规则是：字号明显大于正文 → 标题；同时有粗体和斜体 trait → <code>***文本***</code>；等宽字体 → 反引号代码。"
+    ],
+    [
+     "为什么要处理段落的 textLists",
+     "列表在富文本里不是靠文字前缀表示的，而是靠 <code>NSParagraphStyle</code> 里的 <code>textLists</code>。不读这个属性就完全检测不到列表。"
+    ],
+    [
+     "为什么行内解析要单遍扫描",
+     "用多个正则依次替换会互相干扰——比如给粗体加标记后，斜体的正则可能匹配到刚插入的星号。单遍从左到右扫描，遇到标记就找配对的结束标记，不会重复处理。"
+    ]
+   ],
+   "steps": [
+    [
+     "按行分类",
+     "逐行判断：空行、代码围栏、标题、引用、无序列表、有序列表、表格、普通段落。"
+    ],
+    [
+     "处理代码围栏",
+     "遇到 <code>```</code> 进入代码模式，缓冲所有行直到下一个围栏，整块用等宽字体 + 灰底输出。"
+    ],
+    [
+     "解析行内标记",
+     "<code>inline()</code> 扫描反引号、星号、下划线、链接、图片，分别生成对应的属性。"
+    ],
+    [
+     "合并段落",
+     "连续的普通行用空格连接成一个段落——Markdown 里一个段落可以跨多行，直接逐行输出会得到破碎的排版。"
+    ],
+    [
+     "反向：遍历属性区段",
+     "用 <code>attributes(at:effectiveRange:)</code> 按属性变化的边界切分文本，每段独立判断该用什么 Markdown 语法。"
+    ]
+   ],
+   "pitfalls": [
+    [
+     "从 Word 转出来的 Markdown 全是纯文本",
+     "只检查了粗体/斜体 trait，没有读字号，所以标题识别不出来。",
+     "加入字号阈值：≥24pt 是 <code>#</code>，≥20pt 是 <code>##</code>，以此类推。"
+    ],
+    [
+     "列表变成了普通段落",
+     "没有读取 <code>NSParagraphStyle.textLists</code>。",
+     "检查 <code>style.textLists.first</code> 的 <code>markerFormat</code>，据此输出 <code>-</code> 或 <code>1.</code>。"
+    ],
+    [
+     "行内代码块后面的文字样式错乱",
+     "多次正则替换导致标记嵌套。",
+     "改为单遍扫描。"
+    ]
+   ],
+   "diagrams": [
+    [
+     "双向转换的两个方向",
+     "\n  <b>Markdown → 富文本</b>（正向，较容易）\n\n    # 标题          ──►  20pt 粗体\n    **粗体**        ──►  bold trait\n    - 项目          ──►  • + 缩进段落样式\n    `代码`          ──►  等宽 + 灰底\n    [文字](url)     ──►  蓝色下划线 + link 属性\n\n  <b>富文本 → Markdown</b>（反向，较难）\n\n    20pt 粗体        ──►  # 标题          <u>靠字号推断</u>\n    bold trait      ──►  **文本**\n    italic trait    ──►  *文本*\n    等宽字体         ──►  `文本`\n    link 属性       ──►  [文字](url)\n    textLists       ──►  - 项目           <u>靠段落样式推断</u>"
+    ]
+   ],
+   "reading": [
+    [
+     "Features/Document/MarkdownConverter.swift",
+     "看 attributed(from:)：正向；看 markdown(from:)：反向"
+    ]
+   ]
+  },
+  "hash": {
+   "principle": "一次读取文件，同时喂给五个哈希器。这不是微优化——对 4 GB 的文件，读五遍意味着多花四倍的磁盘 I/O。",
+   "why": [
+    [
+     "为什么要一次多算",
+     "机械硬盘顺序读取约 150 MB/s，SSD 约 500 MB/s。4 GB 文件读一遍 8–27 秒。如果用户想看 MD5 和 SHA-256，分别计算就要读两遍。既然都要读，不如一次喂给所有哈希器。"
+    ],
+    [
+     "为什么用 CryptoKit 而 CRC32 自己写",
+     "CryptoKit 提供 MD5、SHA-1、SHA-256、SHA-512 的流式接口，硬件加速且经过审计。但 CRC32 是校验和不是加密哈希，CryptoKit 没有，所以用查表法实现——256 项表，每字节一次查表异或。"
+    ],
+    [
+     "为什么分块读取",
+     "一次性 <code>Data(contentsOf:)</code> 会把整个文件读进内存。1 GB 的文件就占 1 GB 内存。改成 1 MB 分块流式处理，内存恒定。"
+    ],
+    [
+     "为什么用 FileHandle 而不是 mmap",
+     "内存映射对超大文件更高效，但会把文件锁在虚拟内存里，而且对网络卷、外部磁盘的行为不一致。流式读取更可预测。"
+    ]
+   ],
+   "steps": [
+    [
+     "打开文件并取总大小",
+     "总大小用于计算进度百分比。"
+    ],
+    [
+     "循环读取 1 MB 块",
+     "每读一块，依次调用每个哈希器的 <code>update(data:)</code>。没有启用的算法对应变量为 nil，用可选链跳过。"
+    ],
+    [
+     "收尾",
+     "<code>finalize()</code> 得到摘要，转成十六进制字符串。"
+    ],
+    [
+     "比对（可选）",
+     "如果用户填了期望值，与指定算法的结果做不区分大小写的比较。"
+    ]
+   ],
+   "pitfalls": [
+    [
+     "CRC32 结果与系统工具不一致",
+     "CRC32 有多个变体（初始值、多项式、是否取反各不相同）。GIF 用的是另一种。",
+     "采用 IEEE 802.3 标准：初值 <code>0xFFFFFFFF</code>、多项式 <code>0xEDB88320</code>、结果取反，与 <code>zlib.crc32</code> 一致。"
+    ]
+   ],
+   "diagrams": [
+    [
+     "一次读取，五个哈希器",
+     "\n                 ┌──────────────────────────────────────┐\n                 │           文件（1 MB 分块）           │\n                 └──────────────────────────────────────┘\n                                  │\n              ┌───────────┬───────┴───────┬───────────┐\n              ▼           ▼               ▼           ▼\n         <s>Insecure.MD5</s> <s>Insecure.SHA1</s> <s>SHA256</s> <s>SHA512</s>   <i>CRC32</i>\n              │           │               │           │        │\n              └───────────┴───────┬───────┴───────────┘        │\n                                  ▼                            ▼\n                            finalize()                  查表 + 异或\n                                  │                            │\n                                  └──────────┬─────────────────┘\n                                             ▼\n                              MD5 · SHA-1 · SHA-256 · SHA-512 · CRC32\n\n          <b>磁盘 I/O：1 次</b>  而不是 5 次"
+    ]
+   ],
+   "reading": [
+    [
+     "Core/HashEngine.swift",
+     "看 hash(_:algorithms:)：单次循环喂给所有哈希器；看 CRC32 表"
+    ]
+   ]
+  },
+  "inspect": {
+   "principle": "检查类工具<b>没有按钮</b>。文件一拖进去就计算结果并内联显示，改选项也立刻重算。这是「不同性质的功能用不同交互」的直接体现。",
+   "why": [
+    [
+     "为什么不需要按钮",
+     "计算校验值、读取图片信息都是<b>纯函数式</b>的操作：给定输入立刻有确定结果，不产生副作用。让用户先点一下再等结果，纯属多余。"
+    ],
+    [
+     "为什么要有独立的报告模型",
+     "如果把结果塞进日志面板，用户得切换到「日志」标签才能看到，而且格式是纯文本。定义 <code>InspectionReport</code> 之后，结果能分组、能标记状态、能给每行加复制按钮。"
+    ],
+    [
+     "为什么图片类型判定不看 ffprobe",
+     "ffprobe 把 JPEG 报告成单帧 <code>mjpeg</code> <b>视频流</b>。如果只判断「有没有视频流」，图片就会被显示成「时长 0 秒、帧率 0 fps、码率 0」——全是无意义的字段。所以先按扩展名分类，容器不明确时（如 .mkv）才回退到流判断。"
+    ],
+    [
+     "为什么要防抖",
+     "拖入文件会触发计算，改参数也会。连续调整「提取主色调」开关时，会启动多个并发任务。用输入快照比对丢弃过期结果：计算完成后检查输入是否还是当初那一批，不是就丢弃。"
+    ]
+   ],
+   "steps": [
+    [
+     "输入变化触发",
+     "<code>addInputs</code>、<code>removeInput</code>、<code>parametersChanged</code> 都会调用 <code>runInspectionIfNeeded()</code>。"
+    ],
+    [
+     "标记计算中",
+     "设置 <code>isInspecting = true</code>，界面显示进度指示。"
+    ],
+    [
+     "后台计算",
+     "在 <code>Task</code> 里调用 <code>inspector.inspect(...)</code>，不阻塞主线程。"
+    ],
+    [
+     "过期检查",
+     "回到主线程后比对输入快照，不一致就丢弃结果，避免旧结果覆盖新结果。"
+    ],
+    [
+     "渲染",
+     "<code>InspectionReportView</code> 按分组渲染，等宽值的行带复制按钮，有状态的显示 ✓ / ✗。"
+    ]
+   ],
+   "pitfalls": [
+    [
+     "图片信息里显示时长、帧率、码率",
+     "<code>hasVideo</code> 只判断 <code>videoCodec != nil</code>，而 ffprobe 把 JPEG 当作视频流。",
+     "引入 <code>MediaKind</code> 按扩展名分类，并新增 <code>hasTimeline</code> 控制时长类字段是否显示。"
+    ],
+    [
+     "拖入文件后没有自动出结果",
+     "只计算了预估，没有触发检查器。",
+     "在输入与参数变化的所有路径上都调用 <code>runInspectionIfNeeded()</code>。"
+    ]
+   ],
+   "diagrams": [
+    [
+     "检查类 vs 转换类的分流",
+     "\n   文件拖入\n       │\n       ▼\n   selectedTool.inspector 存在？\n       │\n       ├── <i>是</i> ──► runInspectionIfNeeded()\n       │                  │\n       │                  ├─ isInspecting = true\n       │                  ├─ 后台 inspect()\n       │                  ├─ 输入快照比对（丢弃过期结果）\n       │                  └─ <b>InspectionReport</b> ──► 内联渲染\n       │\n       └── <u>否</u> ──► 等待用户点击按钮\n                          │\n                          ▼\n                     JobQueue（转换类流程）"
+    ]
+   ],
+   "reading": [
+    [
+     "Core/Inspection.swift",
+     "看 InspectionReport：为什么用结构化模型而不是字符串"
+    ],
+    [
+     "Features/Inspect/ImageInspector.swift",
+     "看 inspect()：元数据如何分层收集"
+    ],
+    [
+     "App/AppState.swift",
+     "看 runInspectionIfNeeded()：过期结果如何丢弃"
+    ]
+   ]
+  },
+  "image": {
+   "principle": "缩放、裁剪、旋转、圆角、水印、拼接全部用 CoreGraphics 实现。关键点是<b>所有几何运算都在 CGContext 里完成</b>，而不是先生成中间文件再处理。",
+   "why": [
+    [
+     "为什么用 CoreGraphics 而不是 ImageMagick",
+     "CoreGraphics 是系统框架，无需安装、无需进程间通信、且能利用 GPU 与 SIMD。ImageMagick 需要额外依赖，对批量处理还要反复启动进程。"
+    ],
+    [
+     "为什么要处理 EXIF 方向",
+     "手机拍的照片像素是横的，靠 EXIF 里的 orientation 标记告诉播放器旋转。如果直接读像素再处理，会得到横过来的图。所以 <code>loadOriented</code> 先读方向标记，再决定是否预旋转。"
+    ],
+    [
+     "为什么用 premultipliedLast",
+     "CoreGraphics 的 <code>premultipliedLast</code> 表示 RGBA 且颜色已乘过 alpha。这是 CGContext 绘制图像时最自然的格式，用其他格式会导致半透明边缘出现黑边或白边。"
+    ],
+    [
+     "为什么水印字号按图片宽度百分比",
+     "固定字号在不同尺寸的图片上效果完全不同：24pt 在 800px 宽的图上合适，在 4000px 宽的照片上小得看不见。按宽度百分比计算，批量处理时视觉比例一致。"
+    ],
+    [
+     "为什么拼图要先统一单元格",
+     "尺寸各异的图片直接拼接会得到参差不齐的结果。先算出统一的单元格尺寸，每张图按 contain 缩放居中，再按网格绘制。"
+    ]
+   ],
+   "steps": [
+    [
+     "解码并纠正方向",
+     "<code>loadOriented</code> 读 EXIF orientation，必要时调用 <code>transform</code> 预旋转。"
+    ],
+    [
+     "按适配方式计算目标矩形",
+     "<code>resize</code> 支持四种模式：stretch 直接拉伸；contain/pad 保持比例缩放并居中（pad 会填充背景）；cover 放大到覆盖后裁剪。"
+    ],
+    [
+     "绘制到新画布",
+     "创建目标尺寸的 <code>CGContext</code>，设置 <code>interpolationQuality = .high</code>，再 draw。"
+    ],
+    [
+     "编码写出",
+     "ImageIO 负责 PNG/JPEG/HEIC/TIFF 等；WebP 交给内嵌的 cwebp；不支持的格式回退。"
+    ]
+   ],
+   "pitfalls": [
+    [
+     "WebP 输出是损坏文件",
+     "macOS 的 ImageIO 不能写 WebP，最初尝试自己实现 VP8L 编码器，但产出的比特流被 <code>dwebp</code> 判定为 BITSTREAM_ERROR。",
+     "改用 cwebp（WebP 官方编码器），并把它及其 8 个动态库一起内嵌进应用。"
+    ],
+    [
+     "半透明图片合成后边缘发黑",
+     "使用了非预乘 alpha 的位图格式。",
+     "统一使用 <code>premultipliedLast</code>。"
+    ],
+    [
+     "竖屏照片处理后变成横的",
+     "没有读取 EXIF orientation。",
+     "所有入口都走 <code>loadOriented</code>。"
+    ]
+   ],
+   "diagrams": [
+    [
+     "四种适配方式",
+     "\n  源图 640×360  →  目标 480×480\n\n  <b>contain / pad</b>（保持比例，留边）      <b>cover</b>（保持比例，裁剪）\n  ┌──────────────────┐              ┌──────────────────┐\n  │░░░░░░░░░░░░░░░░░░│              │██████████████████│\n  │░░┌────────────┐░░│              │██████████████████│\n  │░░│  完整显示  │░░│              │████ 裁剪填满 ████│\n  │░░└────────────┘░░│              │██████████████████│\n  │░░░░░░░░░░░░░░░░░░│              │██████████████████│\n  └──────────────────┘              └──────────────────┘\n        480×480                          480×480\n     实际画面 480×270                  实际画面 = 目标\n\n  <b>stretch</b>（拉伸，变形）\n  ┌──────────────────┐\n  │██████████████████│   画面被压扁\n  │██████████████████│   比例失真\n  └──────────────────┘\n\n  <u>目标大于源图且未开启「允许放大」时，会钳制到源尺寸</u>"
+    ]
+   ],
+   "reading": [
+    [
+     "Features/Image/ImageSupport.swift",
+     "看 resize：四种适配；看 watermark：坐标如何计算"
+    ]
+   ]
+  },
+  "estimate": {
+   "principle": "预估模型由两部分组成：<b>编码器的比特每像素经验值</b>，以及<b>本机实测吞吐</b>。所有结果都标注为估算值，并说明推导依据。",
+   "why": [
+    [
+     "为什么用比特每像素而不是直接查表",
+     "视频体积取决于像素数 × 帧率 × 每像素比特数。每像素比特数由编码器和 CRF 决定。用这个模型，任何分辨率与帧率都能推导，不需要穷举测试。"
+    ],
+    [
+     "为什么 CRF 用指数映射",
+     "CRF 与码率大致呈指数关系：CRF 每降低 6，码率约翻倍。所以用 <code>2^((参考CRF - 实际CRF) / 6)</code> 换算，比线性近似准确得多。"
+    ],
+    [
+     "为什么耗时区分软件与硬件编码",
+     "VideoToolbox 走专用硬件单元，比软件编码快约 5 倍。如果不区分，开启硬件加速后预估耗时会严重高估。"
+    ],
+    [
+     "为什么预估要说明依据",
+     "预估值必然有误差。与其给一个没有解释的数字，不如告诉用户「这是按编码器、CRF 与分辨率估算的」，用户就能判断可信度。"
+    ],
+    [
+     "为什么报告型工具没有预估",
+     "「计算校验值」不产生文件，没有输出体积可言。显示「预计输出 1.5 MB」是误导，所以直接不显示预估卡片。"
+    ]
+   ],
+   "steps": [
+    [
+     "读取媒体信息",
+     "<code>MediaProbe</code> 拿到时长、分辨率、帧率、音频参数。"
+    ],
+    [
+     "计算视频码率",
+     "像素数 × 帧率 × 每像素比特数。按目标体积或指定码率时直接采用给定值。"
+    ],
+    [
+     "叠加音频码率",
+     "AAC/MP3 用指定码率；无损格式按采样率×声道×位深估算；流复制时沿用原码率。"
+    ],
+    [
+     "换算体积",
+     "总码率 ÷ 8 × 时长，再加 3% 容器开销。"
+    ],
+    [
+     "估算耗时",
+     "总帧数 ÷ 本机吞吐（按分辨率归一化，再乘预设与硬件系数）。"
+    ]
+   ],
+   "pitfalls": [
+    [
+     "预估偏差过大",
+     "最初对所有编码器用同一个每像素比特数，导致 HEVC 的预估值比实际大 40%。",
+     "为每种编码器单独标定基准值。"
+    ],
+    [
+     "按目标体积压缩时预估不准",
+     "仍走码率模型，而目标体积模式本来就是精确指定的。",
+     "识别出该模式后直接采用目标值，并标记为精确而非估算。"
+    ]
+   ],
+   "diagrams": [
+    [
+     "体积预估公式",
+     "\n  视频码率 = 宽 × 高 × 帧率 × <b>每像素比特数</b>\n                                      │\n                    ┌─────────────────┴─────────────────┐\n                    ▼                                   ▼\n              <i>编码器基准</i>                         <i>CRF 系数</i>\n              H.264  0.085                     2 ^ ((23 − CRF) / 6)\n              HEVC   0.060                     CRF 每降 6 → 码率翻倍\n              VP9    0.055\n              AV1    0.045                     <u>预设系数</u>\n              ProRes 3.2                       ultrafast 1.35 → slower 0.88\n\n  音频码率 = AAC/MP3 指定值 · 无损按采样率估算 · 流复制沿用原值\n\n  总体积 = (视频码率 + 音频码率) ÷ 8 × 时长 × 1.03\n                                              └─ 容器开销\n\n  耗时   = 总帧数 ÷ (本机吞吐 × 分辨率系数 × 预设系数 × 硬件系数)"
+    ]
+   ],
+   "reading": [
+    [
+     "Core/Estimator.swift",
+     "看 bitsPerPixel：为什么用指数映射；看 encodeSeconds：吞吐如何标定"
+    ],
+    [
+     "Core/EstimateEngine.swift",
+     "看 compute：按工具分派；看报告型工具的早退"
+    ]
+   ]
+  },
+  "design": {
+   "principle": "全部使用 macOS <b>系统语义色</b>与原生控件。这样自动适配浅色/深色模式、增强对比度，以及用户自己选的强调色。",
+   "why": [
+    [
+     "为什么不用固定 RGB",
+     "最初用一套写死的深色值，结果强制深色模式，在浅色系统上显得格格不入，而且无法跟随用户的强调色设置。改用 <code>labelColor</code>、<code>separatorColor</code>、<code>controlBackgroundColor</code> 之后，系统负责一切适配。"
+    ],
+    [
+     "为什么控件要用原生",
+     "SwiftUI 的 <code>Slider</code>、<code>Toggle(.switch)</code>、<code>Picker(.segmented)</code> 底层是 AppKit 控件，外观、动画、键盘交互都与系统一致。自己画的控件很难做到这一点。"
+    ],
+    [
+     "为什么要统一的间距刻度",
+     "随手写 7、13、19 这样的数值会让界面显得杂乱。定义 4/8/12/16/20/24/32 的刻度后，所有间距都是 4 的倍数，视觉节奏自然统一。"
+    ],
+    [
+     "为什么分类色要低饱和",
+     "53 个工具分布在 5 个分类。如果分类色饱和度高，整个侧边栏会像彩虹。现在只在图标上使用低饱和度系统色作为定位提示，不铺大面积背景。"
+    ]
+   ],
+   "steps": [
+    [
+     "定义语义色",
+     "<code>Palette</code> 把系统颜色映射成有语义的名字，界面代码只引用语义名。"
+    ],
+    [
+     "定义字体与间距刻度",
+     "<code>Type</code> 与 <code>Metrics</code> 提供命名常量。"
+    ],
+    [
+     "构建组件",
+     "<code>Section</code>、<code>PrimaryButton</code>、<code>DropZone</code>、<code>FileListView</code> 等。"
+    ],
+    [
+     "参数表单自动生成",
+     "<code>ParameterForm</code> 按参数声明选择控件类型：短选项用分段控件，长选项用下拉菜单，开关用原生开关。"
+    ]
+   ],
+   "pitfalls": [
+    [
+     "深浅模式切换后文字看不清",
+     "使用了固定的白色/黑色文字。",
+     "改用 <code>labelColor</code> 系列语义色。"
+    ],
+    [
+     "按钮文案与实际行为不符",
+     "所有工具共用一个「开始转换」。",
+     "每个工具声明自己的动词，并支持按模式切换（生成/识别、加密/解密、预览/执行）。"
+    ]
+   ],
+   "diagrams": [
+    [
+     "参数声明如何变成界面",
+     "\n  <b>Tool.parameters</b>（数据）\n        │\n        ├─ .text(\"expected\", \"校验值比对\")        ──► <u>LabeledTextField</u>\n        ├─ .slider(\"crf\", \"画质\", 0…51)           ──► <u>SliderInput</u>\n        ├─ .toggle(\"hardware\", \"硬件加速\")        ──► <u>SwitchToggle</u>\n        ├─ .picker(4 个短选项)                    ──► <u>SegmentPicker</u>\n        └─ .picker(8 个长选项)                    ──► <u>PopUpPicker</u>\n                  │\n                  ▼\n        <b>ParameterForm</b> 遍历并渲染\n                  │\n                  ▼\n        visibleWhen 条件满足的才显示\n        （例如「自定义宽度」只在 scale = custom 时出现）\n\n  <i>新增工具只需声明参数，界面自动生成</i>"
+    ]
+   ],
+   "reading": [
+    [
+     "Design/Theme.swift",
+     "看 Palette：语义色映射；看 Metrics：间距刻度"
+    ],
+    [
+     "Design/Controls.swift",
+     "看 ParameterForm：参数声明如何选择控件"
+    ]
+   ]
+  },
+  "dmg": {
+   "principle": "要让 DMG 在<b>任何 Mac</b>上直接运行，必须解决两件事：<b>架构</b>（Apple 芯片与 Intel 都能跑）和<b>依赖</b>（不要求用户装 Homebrew）。",
+   "why": [
+    [
+     "为什么不能直接拷贝 Homebrew 的 ffmpeg",
+     "Homebrew 的 ffmpeg 通过<b>绝对路径</b>链接了 18 个 dylib，例如 <code>/opt/homebrew/Cellar/ffmpeg/9.0.1_1/lib/libavcodec.63.dylib</code>。换一台没装 Homebrew 的机器，这些路径不存在，动态链接器直接报错。"
+    ],
+    [
+     "为什么改用静态构建",
+     "静态链接的 ffmpeg 只依赖系统框架（Foundation、VideoToolbox 等），零非系统依赖。把这样一个文件拷进应用包就能跑，不需要重写安装路径，也不需要处理依赖闭包。"
+    ],
+    [
+     "为什么要分别下载两种架构",
+     "静态构建按架构提供。arm64 与 x86_64 各下一份，再用 <code>lipo -create</code> 合并成通用二进制。这样同一个应用包在两种 Mac 上都能启动。"
+    ],
+    [
+     "为什么 cwebp 要特殊处理",
+     "cwebp 没有静态构建，它链接了 8 个 Homebrew 库（libwebp、libtiff、libpng、libjpeg 等）。所以递归复制整个依赖闭包进 <code>Contents/Frameworks</code>，再用 <code>install_name_tool</code> 把引用改写成 <code>@rpath</code>。"
+    ],
+    [
+     "为什么验证要用 otool 而不是直接运行",
+     "直接运行 GUI 应用会打开窗口并阻塞构建脚本——这正是早期「每次构建都弹窗」的原因。改成用 <code>otool -L</code> 静态检查依赖是否全部可解析。"
+    ]
+   ],
+   "steps": [
+    [
+     "下载并校验静态工具",
+     "<code>fetch-tools.sh</code> 下载后检查架构是否匹配、非系统依赖是否为 0，不通过就报错退出。"
+    ],
+    [
+     "编译两个架构",
+     "分别用 <code>-target arm64-apple-macosx14.0</code> 与 <code>-target x86_64-apple-macosx14.0</code> 编译，再用 <code>lipo</code> 合并。"
+    ],
+    [
+     "内嵌工具",
+     "ffmpeg/ffprobe 合并为通用二进制；7z 直接拷贝；cwebp 连同依赖闭包一起拷贝并改写路径。"
+    ],
+    [
+     "签名",
+     "先签内嵌的二进制与动态库，最后签应用包——顺序反了会导致外层签名失效。"
+    ],
+    [
+     "验证",
+     "检查应用架构、每个工具能否运行、依赖是否全部可解析。"
+    ],
+    [
+     "打包",
+     "<code>hdiutil create</code> 生成压缩的只读映像，并放入 Applications 快捷方式。"
+    ]
+   ],
+   "pitfalls": [
+    [
+     "DMG 里 7z 只有 64 字节",
+     "Homebrew 的 <code>7z</code> 是一个 shell 包装脚本，内容是指向真实二进制的路径。直接拷贝只拷到了脚本。",
+     "解析包装脚本，找到真实二进制再拷贝。"
+    ],
+    [
+     "验证脚本误报 ffmpeg 有外部依赖",
+     "通用二进制的 <code>otool -L</code> 会先输出一行架构标题，格式是 <code>路径 (architecture x86_64):</code>。<code>awk '{print $1}'</code> 把这一行也当成了依赖。",
+     "只取以制表符开头的行（真正的依赖行）。"
+    ],
+    [
+     "hdiutil 报「操作不被允许」",
+     "创建磁盘映像需要挂载设备的权限，受限环境下会被拒绝。",
+     "脚本检测失败后给出明确提示与手动命令，而不是静默产出空结果。"
+    ]
+   ],
+   "diagrams": [
+    [
+     "通用二进制的组成",
+     "\n  <b>FormatForge.app</b>\n  ├── Contents/\n  │   ├── MacOS/FormatForge          <i>arm64 + x86_64</i>（lipo 合并）\n  │   ├── Frameworks/                 <u>cwebp 的 8 个依赖库</u>\n  │   │   ├── libwebp.7.dylib         install_name → @rpath/libwebp.7.dylib\n  │   │   ├── libtiff.6.dylib\n  │   │   ├── libpng16.16.dylib\n  │   │   └── …\n  │   └── Resources/Tools/\n  │       ├── ffmpeg                  <i>arm64 + x86_64</i>  133 MB  静态\n  │       ├── ffprobe                 <i>arm64 + x86_64</i>  133 MB  静态\n  │       ├── 7z                      arm64              428 KB  静态\n  │       └── cwebp                   arm64               76 KB  @rpath\n  └── Info.plist\n\n  <b>运行时查找顺序</b>\n     1. 应用内 Resources/Tools/     ← 优先\n     2. 用户自定义 ffmpeg 路径\n     3. /opt/homebrew/bin · /usr/local/bin · /usr/bin"
+    ]
+   ],
+   "reading": [
+    [
+     "Scripts/fetch-tools.sh",
+     "看依赖校验：为什么必须为 0 才通过"
+    ],
+    [
+     "make-dmg.sh",
+     "看 bundle_cwebp：递归复制依赖闭包；看 verify_bundle"
+    ],
+    [
+     "Core/ProcessRunner.swift",
+     "看 locate()：三级查找顺序"
+    ]
+   ]
+  }
+ },
+ "articleIndex": {
+  "arch": {
+   "title": "整体架构",
+   "blurb": "两个核心判断决定了整个项目：<b>每个工具必须拥有独立的工作状态</b>，以及<b>不同性质的功能不应该共用同一套交互流程</b>。",
+   "files": [
+    "App/AppState.swift",
+    "Core/ToolSession.swift",
+    "Core/Tool.swift"
+   ]
+  },
+  "pipeline": {
+   "title": "任务执行管线",
+   "blurb": "从点击按钮到文件落盘，中间经过参数构建、子进程执行、进度回传、结果汇总。难点不是「调用命令行」，而是并发控制、可取消、进度实时回传。",
+   "files": [
+    "Core/JobQueue.swift",
+    "Core/ProcessRunner.swift",
+    "Core/JobLog.swift"
+   ]
+  },
+  "ffmpeg": {
+   "title": "ffmpeg 驱动与进度解析",
+   "blurb": "视频功能全部建立在 ffmpeg 之上。难在参数组合的正确性——编码器、容器、像素格式、滤镜之间有大量隐含约束。",
+   "files": [
+    "Core/FFmpeg.swift",
+    "Core/MediaProbe.swift"
+   ]
+  },
+  "gif": {
+   "title": "自研 GIF 编码器",
+   "blurb": "macOS 的 ImageIO 只能读不能写 GIF，所以输出完全自己实现：中位切分色彩量化、LZW 压缩、Bayer 抖动、逐帧转场合成。",
+   "files": [
+    "Codecs/GifEncoder.swift"
+   ]
+  },
+  "markdown": {
+   "title": "自研 Markdown 双向转换",
+   "blurb": "不依赖 pandoc。正向解析到富文本，反向从字体特征推断 Markdown 语法。",
+   "files": [
+    "Features/Document/MarkdownConverter.swift"
+   ]
+  },
+  "hash": {
+   "title": "五种校验值的一次性计算",
+   "blurb": "一次读取文件，同时喂给五个哈希器。对 4 GB 文件意味着少读四遍磁盘。",
+   "files": [
+    "Core/HashEngine.swift"
+   ]
+  },
+  "inspect": {
+   "title": "检查类工具：拖入即出结果",
+   "blurb": "检查类工具没有按钮、不进队列、不问保存位置，文件一拖进去就出结果。",
+   "files": [
+    "Core/Inspection.swift",
+    "Features/Inspect/ImageInspector.swift"
+   ]
+  },
+  "image": {
+   "title": "图像处理核心",
+   "blurb": "缩放、裁剪、旋转、圆角、水印、拼接全部用 CoreGraphics，不依赖 ImageMagick。",
+   "files": [
+    "Features/Image/ImageSupport.swift"
+   ]
+  },
+  "estimate": {
+   "title": "体积与耗时预估",
+   "blurb": "模型由编码器的比特每像素经验值与本机实测吞吐两部分组成。",
+   "files": [
+    "Core/Estimator.swift",
+    "Core/EstimateEngine.swift"
+   ]
+  },
+  "design": {
+   "title": "界面设计系统",
+   "blurb": "全部使用 macOS 系统语义色与原生控件，自动适配深浅色与用户强调色。",
+   "files": [
+    "Design/Theme.swift",
+    "Design/Components.swift",
+    "Design/Controls.swift"
+   ]
+  },
+  "dmg": {
+   "title": "打包为通用 DMG",
+   "blurb": "要让 DMG 在任何 Mac 上运行，必须解决架构（arm64 + x86_64）与依赖（内嵌 ffmpeg 及其库）两个问题。",
+   "files": [
+    "Core/ProcessRunner.swift"
+   ]
+  }
+ },
+ "toolNotes": {
+  "video.convert": {
+   "idea": "转码的核心是<b>三层参数的正确组合</b>：编码器决定画质与体积，容器决定兼容性，两者必须匹配。",
+   "how": [
+    "从参数里取出目标编码器与容器扩展名。",
+    "检查合法性：VP9/AV1 只能进 WebM 或 MKV，选了 MP4 就自动改成 WebM；反之 H.264 选了 WebM 就改回 MP4。",
+    "组装视频参数：软件编码用 <code>-crf</code> + <code>-preset</code>，硬件编码用 <code>-q:v</code>。",
+    "组装音频参数：支持直接复制（<code>-c:a copy</code>）以避免无谓的重新编码。",
+    "MP4/MOV 加 <code>-movflags +faststart</code>，把索引移到文件头，这样边下边播时不必等整个文件下载完。"
+   ],
+   "notes": [
+    "容器自动纠正是有意为之：与其让 ffmpeg 报一个难懂的错，不如按用户意图调整。",
+    "画质参数默认 CRF 23（H.264 的经验甜点），预设默认 medium。"
+   ]
+  },
+  "video.compress": {
+   "idea": "提供三种压缩策略，因为它们回答的是三个不同的问题：「画质能接受多低」「必须小于多少 MB」「码率定多少」。",
+   "how": [
+    "按画质：直接指定 CRF，体积由编码器决定。",
+    "按目标体积：先用 <code>(目标MB × 8 × 1024) ÷ 时长</code> 反推总码率，减去音频码率得到视频码率，再用两遍编码逼近。",
+    "按码率：直接指定平均码率。",
+    "两遍编码只对软件 H.264 有意义——硬件编码器不支持两遍，所以这条分支会先跑一遍分析（输出到 <code>/dev/null</code>），再跑正式编码。"
+   ],
+   "notes": [
+    "目标体积模式预留 2% 给容器开销，否则容易超一点点。",
+    "两遍编码的第一遍必须把 <code>-pass 1</code> 和 <code>-pass 2</code> 分开成两条命令，不能塞在同一条里。"
+   ]
+  },
+  "video.resize": {
+   "idea": "预设尺寸只按高度缩放（保持比例），只有自定义尺寸才需要「适配方式」——因为预设本质上就是等比缩放，讨论「裁剪填满」没有意义。",
+   "how": [
+    "预设模式：用 <code>scale=-2:H</code>，<code>-2</code> 让 ffmpeg 自动算出偶数宽度（大多数编码器要求宽高为偶数）。",
+    "自定义模式：先算出目标盒子，再按适配方式生成滤镜。",
+    "完整显示用 <code>force_original_aspect_ratio=decrease</code>；裁剪填满用 <code>increase</code> 再 <code>crop</code>；拉伸直接指定宽高。",
+    "未开启「允许放大」时用 <code>min(H\\,ih)</code> 把目标钳制到源尺寸以内。"
+   ],
+   "notes": [
+    "实测：源 640×360 → 目标 480×480 时，完整显示得到 480×270，裁剪填满与拉伸得到 480×480（像素差异 63.8%）。"
+   ]
+  },
+  "video.trim": {
+   "idea": "两种裁剪思路：<b>重新编码</b>能得到精确切点，<b>流复制</b>极快但切点必须对齐关键帧。",
+   "how": [
+    "区间模式：<code>-ss</code> 指定起点，<code>-to</code> 指定终点。",
+    "重新编码时把 <code>-ss</code> 放在 <code>-i</code> 之后以保证精确。",
+    "流复制时把 <code>-ss</code> 放在 <code>-i</code> 之前，让 ffmpeg 快速定位。",
+    "等分模式用 <code>-f segment</code> 配合 <code>-segment_time</code>，并按 <code>seg_%03d</code> 命名输出，最后逐个提交到目标目录。"
+   ],
+   "notes": [
+    "流复制模式下加 <code>-avoid_negative_ts make_zero</code>，否则时间戳可能变成负数导致播放异常。"
+   ]
+  },
+  "video.concat": {
+   "idea": "拼接用 concat 解复用器读一个列表文件，但<b>参数不一致的视频直接拼会出问题</b>，所以要统一几何。",
+   "how": [
+    "写一个列表文件，每行 <code>file '路径'</code>（路径里的单引号要转义）。",
+    "无损模式直接 <code>-c copy</code>——前提是所有片段的编码参数完全一致。",
+    "重新编码模式：以第一个视频的分辨率为准，用 <code>scale</code> + <code>pad</code> 把所有片段统一到同一尺寸，再用 <code>fps</code> 统一帧率，最后加 <code>setsar=1</code> 统一像素宽高比。"
+   ],
+   "notes": [
+    "这里必须让工具自己提供完整的输入前缀，否则通用封装会多加一个 <code>-i</code>，导致输入索引偏移——早期版本因此只输出了第一个片段（3 秒而非 6 秒）。"
+   ]
+  },
+  "video.transform": {
+   "idea": "旋转可以用滤镜真实旋转像素，也可以只写元数据——后者秒完成但播放器支持不一致。",
+   "how": [
+    "顺时针 90° 用 <code>transpose=1</code>，逆时针用 <code>transpose=2</code>，180° 用两次 transpose。",
+    "镜像用 <code>hflip</code> / <code>vflip</code>。",
+    "关闭重新编码时改用 <code>-metadata:s:v:0 rotate=N</code> 只写标记。"
+   ]
+  },
+  "video.speed": {
+   "idea": "变速要同时处理视频与音频，而且 <code>atempo</code> 只接受 0.5–2.0，超出范围必须链式串联。",
+   "how": [
+    "视频用 <code>setpts=PTS/速度</code>。",
+    "音频：当倍率 > 2 时反复乘 2 并记录剩余倍率，当倍率 < 0.5 时反复除 2，最后用剩余的倍率收尾。",
+    "例如 8× 会变成 <code>atempo=2,atempo=2,atempo=2</code>。"
+   ],
+   "notes": [
+    "关闭「保持音调」时改用 <code>asetrate</code>，音调会随速度变化（类似磁带快放）。"
+   ]
+  },
+  "video.watermark": {
+   "idea": "本机 ffmpeg 没有编译 libfreetype，<b>没有 drawtext 滤镜</b>，所以文字水印改为用 CoreText 渲染成透明 PNG，再用 overlay 合成。",
+   "how": [
+    "用 CoreText 的 <code>CTLineGetBoundsWithOptions(.useOpticalBounds)</code> 量出文字实际边界，避免按字体行高留出多余空白。",
+    "渲染到刚好包住文字的透明画布，输出 PNG。",
+    "把 PNG 作为第二个输入，用 <code>overlay</code> 滤镜按位置表达式合成。",
+    "位置表达式用 <code>main_w</code>/<code>main_h</code> 表示底图尺寸，<code>overlay_w</code>/<code>overlay_h</code> 表示水印尺寸。"
+   ],
+   "notes": [
+    "副作用是好事：CoreText 提供完整的中日韩字体支持，而且抗锯齿质量比 drawtext 更好。",
+    "图片水印用 <code>colorchannelmixer=aa=透明度</code> 控制不透明度。"
+   ]
+  },
+  "video.screenshot": {
+   "idea": "单帧截图与批量截图走两条路径：单帧用 <code>-ss</code> 精确跳转，批量用 <code>fps</code> 滤镜抽帧。",
+   "how": [
+    "单帧：<code>-ss</code> 放在 <code>-i</code> 之前快速定位，配 <code>-frames:v 1</code> 只取一帧。",
+    "批量：用 <code>fps=1/间隔</code> 抽帧，输出到临时目录的编号序列，再按顺序重命名提交。",
+    "均匀截取 N 张：先算出区间长度，除以 N 得到等效间隔，再走 fps 路径。",
+    "JPG 质量要反向映射：ffmpeg 的 <code>-q:v</code> 是 2（最好）到 31（最差），所以要 <code>31 - 质量% × 29</code>。"
+   ],
+   "notes": [
+    "硬件解码（<code>-hwaccel videotoolbox</code>）是输入选项，必须放在 <code>-i</code> 之前，否则 ffmpeg 报「不能应用于输出」。"
+   ]
+  },
+  "video.frames": {
+   "idea": "抽帧用 <code>select</code> 滤镜按帧序号取模，比按时间抽帧更精确（不会因关键帧对齐而漂移）。",
+   "how": [
+    "每 N 帧取一帧：<code>select=not(mod(n\\,N))</code>，后面必须跟 <code>setpts=N/FRAME_RATE/TB</code> 重建时间戳。",
+    "也可以按帧率抽帧：<code>fps=N</code>。",
+    "命名支持序号或时间码（<code>00h01m23s456</code> 形式，跨文件系统安全）。",
+    "设了「最多导出帧数」上限，防止误操作导出几万张图占满磁盘。"
+   ]
+  },
+  "video.gif": {
+   "idea": "高质量 GIF 用<b>两遍调色板</b>：先分析整段素材生成专用调色板，再用它量化。比单遍的通用调色板画质明显更好。",
+   "how": [
+    "第一遍：<code>palettegen</code> 分析区间内所有帧，输出一张调色板 PNG。",
+    "第二遍：把调色板作为第二个输入，用 <code>paletteuse</code> 量化。",
+    "链条是 <code>fps → scale(lanczos) → [reverse] → palettegen/paletteuse</code>。",
+    "循环次数映射到 <code>-loop</code>：无限=0，播放一次=-1，3 次=2。"
+   ],
+   "notes": [
+    "GIF 体积增长很快，界面上提示建议不超过 10 秒。",
+    "抖动算法可选：无 / Bayer / Sierra 2-4A / Floyd-Steinberg。"
+   ]
+  },
+  "video.fromimages": {
+   "idea": "ffmpeg 的 image2 解复用器要求文件名是连续编号的，所以先把用户选的文件复制成规范命名再合成。",
+   "how": [
+    "把输入按顺序复制到临时目录，命名为 <code>frame_%05d.ext</code>。",
+    "用 <code>-framerate</code> 指定输入帧率，读取编号序列。",
+    "「每张停留 N 秒」换算成帧率 <code>1/N</code>。",
+    "循环播放用 <code>split</code> + <code>reverse</code> + <code>concat</code> 生成正放加倒放的无缝循环。"
+   ]
+  },
+  "video.slideshow": {
+   "idea": "转场用 <code>xfade</code> 滤镜，但它<b>要求所有输入几何完全一致</b>，所以必须先归一化每张图。",
+   "how": [
+    "先把每张图按目标分辨率缩放，<code>contain</code> 补边或 <code>cover</code> 裁剪。",
+    "可选 Ken Burns 效果：用 <code>zoompan</code> 做缓慢推近。",
+    "每张图作为独立输入，并且要 <code>-loop 1 -t 时长</code>——静态图只有一帧，不循环就没有素材可以交叉淡化。",
+    "用 <code>xfade</code> 串联，每次的 <code>offset</code> 累加<code>每张时长 − 转场时长</code>。"
+   ],
+   "notes": [
+    "总时长 = 张数 × 每张时长 − (张数−1) × 转场时长。实测 3 张 1 秒 + 0.6 秒转场 = 1.8 秒。",
+    "背景音乐作为最后一个输入，用 <code>-shortest</code> 对齐长度。"
+   ]
+  },
+  "video.audio.extract": {
+   "idea": "分离音轨与移除音轨是相反操作，共用同一个工具入口。",
+   "how": [
+    "提取：加 <code>-vn</code>（不要视频），按目标格式选编码器。",
+    "移除：用 <code>-c copy -an</code>，视频流直接复制不重新编码，秒完成。",
+    "可选「同时保留无声视频」会在提取音频后再输出一个去掉音轨的视频。"
+   ]
+  },
+  "video.audio.merge": {
+   "idea": "替换与混合是两种不同需求：替换是「用新音轨覆盖」，混合是「两条音轨同时播放」。",
+   "how": [
+    "先按扩展名把输入分成视频组与音频组，取各一个。",
+    "替换：用 <code>-map 0:v -map [a1]</code>，视频流复制。",
+    "混合：用 <code>amix=inputs=2:duration=first</code> 把原音轨与新音轨混合。",
+    "音量、延迟、淡入淡出串成一条音频滤镜链。"
+   ],
+   "notes": [
+    "滤镜链为空时必须补 <code>anull</code>，否则会生成空滤镜图导致报错。这个 bug 在默认参数下就会触发。"
+   ]
+  },
+  "video.cover": {
+   "idea": "封面既可以是嵌入视频的图片，也可以是从某一帧导出的图片。",
+   "how": [
+    "设置封面：把图片作为第二个输入，用 <code>-disposition:v:1 attached_pic</code> 标记为附加图片，视频流复制。",
+    "提取封面：先用 ffprobe 查询是否存在 <code>attached_pic</code> 流，有就取 <code>0:v:1</code>，没有就取第一帧。",
+    "从帧生成：<code>-ss</code> 跳转后取一帧。"
+   ]
+  },
+  "video.fingerprint": {
+   "idea": "改变文件哈希但<b>不重新编码、不改变画面</b>，靠改元数据和重新封装文件结构实现。",
+   "how": [
+    "用 <code>-c copy</code> 复制所有流，一个比特都不重新编码。",
+    "写入随机标记到 <code>comment</code> 元数据，可选随机化标题。",
+    "加 <code>-movflags +faststart</code> 重排容器结构，这本身就会改变字节流。"
+   ],
+   "notes": [
+    "验证方式很关键：实测修改前后<b>帧数完全一致（180 帧）</b>，证明画面确实没被重新编码。"
+   ]
+  },
+  "video.strip": {
+   "idea": "删除隐私元数据（拍摄设备、GPS、创建时间），同样不重新编码。",
+   "how": [
+    "用 <code>-map_metadata -1</code> 清空所有元数据。",
+    "可选保留旋转信息——竖屏视频依赖它，删掉会变成横的。"
+   ]
+  },
+  "image.convert": {
+   "idea": "格式转换的关键是<b>透明度与有损参数的匹配</b>：JPEG 不支持透明，转过去会变黑底。",
+   "how": [
+    "先读取并纠正 EXIF 方向。",
+    "按「尺寸处理」参数可选地缩放。",
+    "目标格式不支持透明时（JPEG/BMP），先铺一层白底再合成。",
+    "ImageIO 能写的格式直接写；WebP 交给内嵌的 cwebp。"
+   ],
+   "notes": [
+    "实测 JPG→WebP 体积从 28 KB 降到 12 KB。",
+    "HEIC/AVIF 也支持，但编码较慢。"
+   ]
+  },
+  "image.compress": {
+   "idea": "按目标体积压缩用<b>二分搜索</b>逼近：编码器不提供「给我 500 KB」这种接口，只能试。",
+   "how": [
+    "按画质：直接用指定值。",
+    "按目标体积/百分比：在 0.05–1.0 之间二分，每次编码到临时文件量体积，最多 7 轮，误差进入 8% 就提前结束。",
+    "PNG 是无损格式，重新编码通常会让文件变大，所以自动改用 JPEG。"
+   ],
+   "notes": [
+    "二分搜索对每张图要多编码 7 次，所以批量处理会明显变慢——这是精度换时间的取舍。"
+   ]
+  },
+  "image.resize": {
+   "idea": "「仅缩小不放大」是默认开启的，因为放大只会让图片变模糊、体积变大。",
+   "how": [
+    "按模式算出目标尺寸：指定宽/高、精确尺寸、百分比、限制长边。",
+    "若开启仅缩小，把目标钳制到源尺寸以内。",
+    "用 CoreGraphics 以 <code>.high</code> 插值质量重绘。"
+   ]
+  },
+  "image.transform": {
+   "idea": "先裁剪再旋转，顺序不能反——先旋转的话，按比例裁剪的坐标系就变了。",
+   "how": [
+    "按比例居中裁剪：算出源比例与目标比例的差异，取最大内接矩形。",
+    "按百分比内缩：四周各缩进指定比例。",
+    "旋转用 CGContext 的 <code>rotate</code>，同时交换宽高。",
+    "镜像用 <code>scaleBy(x: -1)</code> 实现。"
+   ]
+  },
+  "image.stitch": {
+   "idea": "拼接要先确定<b>统一的单元格尺寸</b>，否则尺寸各异的图会参差不齐。",
+   "how": [
+    "横向：以最高的图为基准，其余按比例缩放到相同高度。",
+    "纵向：以最宽的图为基准。",
+    "网格：取最大宽高作为单元格，每张按 contain 缩放居中。",
+    "CoreGraphics 坐标原点在左下，所以行号要从上往下换算：<code>y = 总高 − (行+1) × 单元格高 − 行 × 间距</code>。"
+   ]
+  },
+  "image.watermark": {
+   "idea": "水印参数按<b>图片宽度的百分比</b>计算，这样批量处理时视觉比例一致。",
+   "how": [
+    "文字水印用 CoreText 绘制；图片水印把水印图按比例缩放后绘制。",
+    "位置用 <code>WatermarkPosition</code> 枚举，计算时注意 CoreGraphics 原点在左下。",
+    "透明度通过 <code>context.setAlpha</code> 控制。"
+   ],
+   "notes": [
+    "图片水印约定：水印图作为最后一个文件添加，其余都是待处理图片。"
+   ]
+  },
+  "image.decorate": {
+   "idea": "圆角、描边、投影三者要按正确顺序绘制：先画阴影，再裁剪绘制图片，最后描边。",
+   "how": [
+    "用 <code>CGPath(roundedRect:)</code> 生成圆角路径。",
+    "投影：设置 shadow 后填充路径（填充色会被阴影遮住，只留阴影效果）。",
+    "裁剪到路径内绘制图片，这样圆角外的部分被裁掉。",
+    "最后描边。加投影时画布四周要预留 40px，否则阴影会被裁掉。"
+   ]
+  },
+  "image.gif": {
+   "idea": "自研 GIF 编码器，因为 macOS 只能读不能写 GIF。详见「自研 GIF 编码器」一节。",
+   "how": [
+    "解码所有帧并渲染到统一画布。",
+    "在相邻帧之间插入转场过渡帧。",
+    "全片采样后做一次中位切分，得到共用调色板。",
+    "用查找表映射索引，可选 Bayer 抖动。",
+    "LZW 编码后按 GIF89a 结构写出。"
+   ]
+  },
+  "image.topdf": {
+   "idea": "用 CoreGraphics 的 PDF 上下文逐页绘制，支持「与图片同尺寸」或标准纸张。",
+   "how": [
+    "创建 <code>CGContext(consumer:mediaBox:)</code>。",
+    "「与图片同尺寸」时每页的 mediaBox 就是图片像素尺寸。",
+    "标准纸张时按适配方式计算绘制矩形；裁剪填满要先 <code>clip</code> 到内容区再绘制。",
+    "自动方向：横图在纵向纸张上会自动转成横向页。"
+   ]
+  },
+  "pdf.toimage": {
+   "idea": "用 PDFKit 按指定 DPI 栅格化每一页。关键是坐标系转换：PDF 原点在左下，且需要按 DPI 缩放。",
+   "how": [
+    "计算缩放比 <code>DPI ÷ 72</code>（PDF 的基准是 72 DPI）。",
+    "创建对应像素尺寸的 CGContext。",
+    "依次 <code>scaleBy</code> 与 <code>translateBy</code>，把 PDF 页面坐标映射到目标画布。",
+    "逐页渲染并写出。"
+   ]
+  },
+  "image.rename": {
+   "idea": "批量重命名最大的风险是<b>命名冲突</b>——把 a 改成 b 的同时 b 要改成 c，直接改会互相覆盖。",
+   "how": [
+    "先按排序规则排列文件，生成完整的「源 → 目标」计划表。",
+    "实际执行时先改成一个随机临时名，再改成目标名，避免链式冲突。",
+    "模板支持 <code>{n}</code> 序号、<code>{name}</code> 原名、<code>{date}</code> 日期、<code>{i}</code> 原始序号、<code>{ext}</code> 扩展名。",
+    "默认开启预览模式，只显示计划不实际改名。"
+   ]
+  },
+  "utility.qr": {
+   "idea": "用 CoreImage 的 <code>CIQRCodeGenerator</code> 生成，用 Vision 识别。",
+   "how": [
+    "生成：<code>CIQRCodeGenerator</code> 产生二维码，再经 <code>CIFalseColor</code> 上色，最后按目标尺寸放大。",
+    "纠错等级映射 L/M/Q/H 四档，等级越高容错越强但码点越密。",
+    "识别：<code>VNDetectBarcodesRequest</code>，支持 QR、Aztec、Code128、EAN13、PDF417、DataMatrix。"
+   ]
+  },
+  "utility.rehash": {
+   "idea": "在不改变文件内容的前提下改变哈希值——在文件末尾追加随机字节。",
+   "how": [
+    "复制原文件后追加 N 个随机字节（追加模式下原内容完全不动）。",
+    "重新计算 MD5 并记录新旧值，确认确实变了。",
+    "对 ZIP/PDF 等格式，尾部追加通常不影响正常打开。"
+   ],
+   "notes": [
+    "这个工具<b>会写文件</b>，与只读的「文件校验值」是两个独立工具。检查器永远不修改任何文件。"
+   ]
+  },
+  "doc.word2pdf": {
+   "idea": "用 CoreText 的 <code>CTFramesetter</code> 自动分页，比手工计算断点可靠。",
+   "how": [
+    "读取源文档为 <code>NSAttributedString</code>。",
+    "创建 <code>CTFramesetter</code>，用页面区域生成一个 frame。",
+    "用 <code>CTFrameGetVisibleStringRange</code> 得知本页放了多少字，从那里继续下一页，直到文字排完。",
+    "最多 5000 页，防止异常输入导致死循环。"
+   ]
+  },
+  "doc.pdf2word": {
+   "idea": "PDF 的文字层需要<b>重新拼接</b>——PDF 里的换行是排版位置决定的，不是段落边界。",
+   "how": [
+    "用 PDFKit 逐页取 <code>page.string</code>。",
+    "把 <code>-\\n</code>（连字符断行）合并，把单换行替换成空格，把连续空格压缩。",
+    "页与页之间插入分隔线。",
+    "没有文字层时明确报错并建议改用 OCR，而不是产出空文档。"
+   ]
+  },
+  "doc.txt2word": {
+   "idea": "纯文本的换行是硬换行，直接转过去会得到破碎的段落，所以要<b>智能合并</b>。",
+   "how": [
+    "空行视为段落边界。",
+    "非空行累积到缓冲区，遇到空行才合并成一段（用空格连接）。",
+    "可选「识别标题行」：全大写短行或以 <code>#</code> 开头的行设为标题样式。"
+   ]
+  },
+  "doc.word2txt": {
+   "idea": "提取纯文本，可选是否保留段落换行。",
+   "how": [
+    "读取为富文本后取 <code>.string</code>。",
+    "关闭「保留段落换行」时把换行替换成空格，得到连续文本。"
+   ]
+  },
+  "doc.word2md": {
+   "idea": "反向转换靠<b>字体特征推断语法</b>。详见「自研 Markdown 双向转换」。",
+   "how": [
+    "按属性变化的边界切分文本。",
+    "字号 ≥24pt → <code>#</code>，≥20pt → <code>##</code>，以此类推。",
+    "粗体 + 斜体 → <code>***</code>；等宽 → 反引号；link 属性 → 链接语法。",
+    "<code>NSParagraphStyle.textLists</code> → 列表标记。"
+   ]
+  },
+  "doc.pdf2md": {
+   "idea": "与 PDF→Word 相同的提取逻辑，输出 Markdown，页面之间用分隔线。",
+   "how": [
+    "逐页提取并拼接文字。",
+    "每页之间插入 <code>---</code> 分隔线。"
+   ]
+  },
+  "doc.md2word": {
+   "idea": "自研 Markdown 解析器渲染成带样式的富文本。",
+   "how": [
+    "逐行分类：标题、列表、引用、代码围栏、表格、段落。",
+    "行内标记用单遍扫描解析（粗体、斜体、代码、链接、图片）。",
+    "代码围栏整块用等宽字体 + 灰底输出。"
+   ]
+  },
+  "doc.md2pdf": {
+   "idea": "Markdown 先渲染成富文本，再用 CoreText 分页导出 PDF。",
+   "how": [
+    "复用 Markdown 解析器得到富文本。",
+    "按 A4/Letter/A3 计算可用区域，逐页排版。"
+   ]
+  },
+  "doc.txt2pdf": {
+   "idea": "与 TXT→Word 相同的智能段落合并，再导出 PDF。",
+   "how": [
+    "合并被硬换行截断的段落。",
+    "可选识别标题行并放大字号。",
+    "按页面尺寸分页。"
+   ]
+  },
+  "doc.tortf": {
+   "idea": "RTF 是兼容性最好的富文本格式，几乎所有文字处理软件都能打开。",
+   "how": [
+    "用 <code>NSAttributedString.data(documentAttributes:)</code> 直接写出。",
+    "失败时回退到系统的 <code>textutil</code>。"
+   ]
+  },
+  "doc.tohtml": {
+   "idea": "输出 HTML，便于直接发布到网页。",
+   "how": [
+    "用系统的 HTML 写入器生成，保留基本样式与链接。"
+   ]
+  },
+  "doc.toodt": {
+   "idea": "ODT 是 LibreOffice / WPS 通用的开放格式。",
+   "how": [
+    "优先用系统写入器；不支持时经 RTF 中转再由 textutil 转换。"
+   ]
+  },
+  "doc.pdfmerge": {
+   "idea": "合并 PDF 时把每个源文件的第一页做成书签，这样合并后还能快速跳转。",
+   "how": [
+    "创建空 PDFDocument，逐个插入源文件的页面。",
+    "记录每个源文件第一页的索引，创建 <code>PDFOutline</code> 节点。",
+    "把节点挂到 <code>outlineRoot</code> 上。"
+   ]
+  },
+  "doc.pdfsplit": {
+   "idea": "三种拆分方式：每 N 页一份、每页一份、提取指定区间。",
+   "how": [
+    "按页数循环，每次新建一个 PDFDocument 并插入对应页面。",
+    "输出文件名带部分编号或页码范围。"
+   ]
+  },
+  "doc.pdfcompress": {
+   "idea": "扫描件的体积主要来自内嵌的高分辨率图片，所以<b>把每页栅格化成较低 DPI 的 JPEG 再放回去</b>。",
+   "how": [
+    "按目标 DPI 计算缩放比，把每页渲染成位图。",
+    "以指定 JPEG 质量重新编码。",
+    "用新页面替换原页面。"
+   ],
+   "notes": [
+    "可选转灰度：灰度 JPEG 比彩色小很多，适合纯文字扫描件。"
+   ]
+  },
+  "doc.pdfsecurity": {
+   "idea": "加密用 PDFKit 的写入选项；解密需要先验证密码。",
+   "how": [
+    "加密：设置 <code>userPasswordOption</code> 与 <code>ownerPasswordOption</code>，权限位用 <code>PDFAccessPermissions</code> 的原始位掩码组合。",
+    "解密：<code>unlock(withPassword:)</code> 验证后另存。"
+   ],
+   "notes": [
+    "PDFKit 固定使用 AES-256，界面上的「加密强度」选项仅作说明。",
+    "权限位要用原始 <code>UInt</code> 组合——Swift 把该枚举桥接成了 Optional，直接用 <code>formUnion</code> 会编译失败。"
+   ]
+  },
+  "doc.ocr": {
+   "idea": "用 Vision 的文字识别，可输出纯文本、Markdown 或<b>可搜索 PDF</b>。",
+   "how": [
+    "PDF 先按 DPI 栅格化成图片序列。",
+    "对每张图执行 <code>VNRecognizeTextRequest</code>。",
+    "可搜索 PDF：绘制原图后，用<b>透明文字</b>把识别结果叠在对应位置——Vision 返回的是归一化坐标（左下原点），与 PDF 坐标系一致，可直接用。"
+   ]
+  },
+  "archive.create": {
+   "idea": "分卷压缩靠 7z 的 <code>-v</code> 参数，加密用 <code>-p</code> 配合 <code>-mhe=on</code> 连文件名一起加密。",
+   "how": [
+    "按格式选择参数：ZIP 用 <code>-tzip</code>，7z 用 <code>-t7z</code>。",
+    "分卷：预设大小直接传（如 <code>-v100m</code>）；按数量则先估算总体积，除以份数得到每卷大小。",
+    "加密：<code>-p密码</code>；7z 额外加 <code>-mhe=on</code> 加密文件名。",
+    "压缩等级 <code>-mx=0…9</code>。"
+   ],
+   "notes": [
+    "按数量分卷时按 75% 估算压缩后体积——压缩率因内容而异，无法精确预知。",
+    "「仅打包不压缩」（等级 0）适合已经压缩过的文件，速度快很多。"
+   ]
+  },
+  "archive.extract": {
+   "idea": "解压时目录名要去掉所有归档后缀，否则 <code>movie.7z.001</code> 会得到名为 <code>movie.7z</code> 的文件夹。",
+   "how": [
+    "去掉复合后缀（<code>.tar.gz</code> 等）。",
+    "去掉数字分卷后缀（<code>.001</code>、<code>.part1</code>）。",
+    "去掉单层归档后缀（<code>.7z</code>、<code>.zip</code>）。",
+    "用 <code>-aos</code> 跳过已存在文件，或 <code>-aoa</code> 覆盖。"
+   ],
+   "notes": [
+    "密码错误时 7z 的报错信息不直观，所以会检查输出里是否包含 password 关键字，给出「密码错误或该压缩包已加密」这样明确的提示。"
+   ]
+  },
+  "utility.hash": {
+   "idea": "一次读取算出五种校验值，不要求用户先选算法。详见「五种校验值的一次性计算」。",
+   "how": [
+    "1 MB 分块流式读取。",
+    "每块同时喂给 MD5、SHA-1、SHA-256、SHA-512 与自实现的 CRC32。",
+    "结果每行都带复制按钮。",
+    "可粘贴期望值做比对，界面用 ✓ / ✗ 标出是否一致。"
+   ]
+  },
+  "utility.info": {
+   "idea": "图片信息按<b>文件类型</b>决定显示哪些字段——图片没有时长和帧率。",
+   "how": [
+    "先按扩展名判定类型，容器不明确时才回退到 ffprobe 流判断。",
+    "分五组收集：文件、尺寸与分辨率、色彩、拍摄参数、位置。",
+    "尺寸组包含打印尺寸：像素数 ÷ DPI 换算成英寸与厘米。",
+    "主色调用中位切分量化提取 6 个代表色。"
+   ],
+   "notes": [
+    "实测一张 JPEG 能读出 5 组共 19+ 项信息，且不含时长/帧率/码率。"
+   ]
+  },
+  "archive.info": {
+   "idea": "用 <code>7z l -slt</code> 得到结构化的键值列表，解析出每个条目的路径、原始大小与压缩后大小。",
+   "how": [
+    "执行 <code>7z l -slt</code>，按 <code>Path = </code> 等前缀解析。",
+    "汇总条目数、原始总大小、压缩后总大小，算出节省比例。",
+    "内容列表最多显示 300 项，超出提示总数。"
+   ]
+  }
+ },
+ "fileNotes": {
+  "App/FormatForgeApp.swift": "应用入口：注册窗口、菜单栏命令与全局快捷键。",
+  "App/AppState.swift": "全局状态中心。持有 53 个工具会话，负责选中、输入、预估、检查与入队。",
+  "App/MainWindow.swift": "主窗口：三栏布局、侧边栏、命令面板与提示条。",
+  "App/Workspace.swift": "工具工作区：输入区、预设、参数、预估、输出与运行栏。",
+  "App/Inspector.swift": "右侧面板：任务列表、日志查看器、媒体信息。",
+  "App/InspectionView.swift": "检查类工具的内联报告渲染（分组、拷贝、状态标记）。",
+  "App/SettingsView.swift": "设置面板：输出位置、并行度、硬件编码、依赖状态。",
+  "Core/Tool.swift": "工具模型：参数声明、条件可见性、结果类型与按钮文案。",
+  "Core/ToolSession.swift": "每个工具独立的会话状态，是多工具并行的基础。",
+  "Core/JobQueue.swift": "任务队列：并发调度、进度回传、取消与结果汇总。",
+  "Core/JobLog.swift": "日志系统：日志条目、命令行记录、生命周期事件。",
+  "Core/ProcessRunner.swift": "子进程封装：工具定位（内嵌优先）、流式输出、可取消。",
+  "Core/FFmpeg.swift": "ffmpeg 参数构建、进度解析、编码格式说明表。",
+  "Core/MediaProbe.swift": "ffprobe 封装：媒体类型判定与元数据缓存。",
+  "Core/Estimator.swift": "体积与耗时预估模型（编码器码率表 + 本机吞吐）。",
+  "Core/EstimateEngine.swift": "按工具与参数分派预估计算。",
+  "Core/Presets.swift": "全部预设模板的集中定义。",
+  "Core/HashEngine.swift": "五种校验值的一次性多算法实现（含 CRC32）。",
+  "Core/Inspection.swift": "检查类工具的报告模型与协议。",
+  "Core/FileIO.swift": "文件工具：冲突处理、目录展开、临时文件。",
+  "Core/AppSettings.swift": "用户偏好持久化与输出位置解析。",
+  "Core/Utilities.swift": "扩展名分类、字体解析、并发辅助。",
+  "Codecs/GifEncoder.swift": "自研 GIF 编码器：中位切分量化 + LZW + Bayer 抖动。",
+  "Codecs/WebPEncoder.swift": "WebP 编码：驱动 cwebp，支持有损/无损。",
+  "Design/Theme.swift": "设计系统：系统语义色、字体与间距刻度。",
+  "Design/Components.swift": "通用组件：区块、按钮、拖拽区、文件列表、进度、编码说明表。",
+  "Design/Controls.swift": "表单控件：字段行、数字输入、滑块、开关、选择器、参数表单。",
+  "Features/ToolRegistry.swift": "工具注册表：53 个工具的总入口。",
+  "Features/Video/VideoSupport.swift": "视频工具共用逻辑：编码参数、几何处理、容器推断。",
+  "Features/Video/VideoTools.swift": "13 个视频工具：转换、压缩、分离、合并、拼接、封面、裁剪、变换、变速、水印、改哈希、清元数据、分辨率。",
+  "Features/Video/VideoFrames.swift": "5 个帧类工具：截图、帧导出、转 GIF、序列转视频、多图转视频。",
+  "Features/Video/TextRenderer.swift": "文字水印渲染：CoreText 生成透明 PNG 供 overlay 合成。",
+  "Features/Image/ImageSupport.swift": "图像核心：编解码、缩放、裁剪、变换、水印、拼接。",
+  "Features/Image/ImageTools.swift": "7 个图片工具：转换、压缩、尺寸、裁剪旋转、水印、拼图、圆角阴影。",
+  "Features/Image/ImageExtra.swift": "图片转 PDF、PDF 转图片、批量重命名、二维码。",
+  "Features/Image/GifBuilder.swift": "多图转 GIF 工具与配方模型。",
+  "Features/Image/GifBuilderView.swift": "GIF 构建器编辑器：帧序列、排序、转场、实时预览。",
+  "Features/Document/DocumentSupport.swift": "文档读写：NSAttributedString / PDFKit / CoreText 分页。",
+  "Features/Document/DocumentTools.swift": "17 个文档工具：格式互转、PDF 合并拆分压缩加密、OCR。",
+  "Features/Document/MarkdownConverter.swift": "自研 Markdown 双向转换器。",
+  "Features/Archive/ArchiveTools.swift": "压缩与解压：分卷、密码、AES-256。",
+  "Features/Inspect/InspectTools.swift": "三个自动显示工具的定义与压缩包内容检查器。",
+  "Features/Inspect/HashInspector.swift": "校验值检查器。",
+  "Features/Inspect/ImageInspector.swift": "图片信息检查器：文件、尺寸、色彩、EXIF、GPS、主色调。"
+ },
+ "chrome": {
+  "theme.dark": "深色",
+  "theme.dim": "柔和暗色",
+  "theme.light": "浅色",
+  "theme.sepia": "护眼米色",
+  "toolbar.fontDown.help": "减小字号（-）",
+  "toolbar.fontDown": "减小字号",
+  "toolbar.fontUp.help": "增大字号（+）",
+  "toolbar.fontUp": "增大字号",
+  "nav.filter.placeholder": "筛选（⌘K）",
+  "nav.overview": "项目概览",
+  "nav.quickstart": "快速开始",
+  "nav.architecture": "架构总览",
+  "nav.source": "源码总览",
+  "nav.dependencies": "依赖说明",
+  "nav.testing": "测试与验证",
+  "code.collapse": "收起代码",
+  "code.expand": "展开全部 ",
+  "code.linesSuffix": " 行",
+  "code.copy": "复制",
+  "code.copied": "已复制",
+  "code.copyFailed": "复制失败",
+  "code.copyAll": "复制全部代码",
+  "drop.anyFile": "任意文件",
+  "drop.automatic": "（自动，无按钮）",
+  "drop.multiple": "（支持多选）",
+  "drop.single": "（仅单个）",
+  "param.toggle": "开关",
+  "param.none": "该工具没有可调参数。",
+  "preset.manual": "手动调整下方所有参数",
+  "section.parameters": "参数",
+  "section.source": "源码",
+  "table.name": "名称",
+  "table.type": "类型",
+  "table.values": "取值",
+  "table.default": "默认",
+  "table.description": "说明",
+  "table.category": "类别",
+  "table.interaction": "交互方式",
+  "stat.toolsUnit": "工具",
+  "table.component": "组件",
+  "table.purpose": "用途",
+  "table.whyNeeded": "为什么需要",
+  "table.whyNotOurs": "为何不自己实现",
+  "table.bundled": "DMG 中是否已内嵌",
+  "stat.tools": "个工具",
+  "stat.files": "个源文件",
+  "stat.swiftLines": "行 Swift",
+  "stat.params": "个可调参数",
+  "stat.presets": "个预设模板",
+  "stat.presetsShort": "预设",
+  "stat.linesShort": "行代码",
+  "stat.toolsShort": "工具 ",
+  "stat.paramsShort": "参数 ",
+  "code.buildCommands": "./build.sh          # 编译并打包 FormatForge.app（仅本机架构）\n./test.sh           # 端到端功能验证（91 项检查）\n./make-dmg.sh       # 构建通用二进制并打包为 DMG\n./run.sh            # 启动应用",
+  "note.firstLaunch": "首次打开：",
+  "note.knownTradeoff": "一处已知取舍：",
+  "dep.ffmpegBundled": "已内嵌（静态链接，通用二进制）",
+  "dep.sevenZipBundled": "已内嵌（arm64 静态）",
+  "dep.cwebpBundled": "已内嵌（含 8 个动态库）",
+  "dep.system": "系统自带",
+  "dep.ffmpegUse": "全部视频功能",
+  "dep.sevenZipUse": "加密分卷压缩",
+  "dep.cwebpUse": "WebP 输出",
+  "dep.textutilUse": "文档转换兜底",
+  "code.treeStructure": "目录结构",
+  "source.intro": "每个源文件的职责与完整代码。这是整个项目的逐文件说明。",
+  "code.lineSuffix": "行",
+  "param.noneHtml": "<p class='tool-id'>该工具没有可调参数。</p>",
+  "preset.manualHtml": "<em>手动调整下方所有参数</em>",
+  "section.parametersHtml": "<h4>参数</h4>",
+  "section.sourceHtml": "<h4>源码</h4>",
+  "source.introHtml": "<p>每个源文件的职责与完整代码。这是整个项目的逐文件说明。</p>",
+  "error.noRegistry": "缺少 build/registry.json — 请先运行 ./Tools/build-tutorial.sh，它会导出注册表再调用本脚本。",
+  "log.generated": "✓ 教程已生成：",
+  "log.tools": "    工具 ",
+  "log.files": " 个，源文件 ",
+  "log.countSuffix": " 个",
+  "log.totalSize": "    总大小 ",
+  "log.mb": " MB",
+  "nav.top": "开始",
+  "param.range": "范围 {min}–{max}，步长 {step}",
+  "param.placeholder": "占位符 {value}",
+  "nav.articles": "深入原理",
+  "table.accepts": "接受格式",
+  "table.buttonLabel": "按钮文案",
+  "table.minimumInputs": "最少输入",
+  "table.filesSuffix": " 个文件",
+  "page.title": "FormatForge 完全开发教程",
+  "page.subtitle": "完全开发教程",
+  "page.lede": "一个 macOS 原生格式转换工具的完整实现剖析：{tools} 个工具、{lines} 行 Swift、零第三方依赖。每个功能的原理与源码都在这里。",
+  "page.description": "FormatForge macOS 格式转换工具的完整实现教程，包含全部 {tools} 个工具的原理与源码。",
+  "page.footer": "FormatForge 完全开发教程 · 由项目源码自动生成，与实现保持同步。",
+  "page.footerDetail": "文档中的每一段代码都直接读取自 <code>Sources/</code>，参数与预设来自运行时的 <code>ToolRegistry</code>，因此不会与代码脱节。",
+  "articles.intro": "以下每一节都说明<b>为什么这样实现</b>：设计取舍、被否决的方案、实际踩过的坑，以及真实代码。长文件默认折叠，点击展开。",
+  "articles.principle": "核心思路",
+  "articles.why": "为什么这样实现",
+  "articles.diagrams": "图示",
+  "articles.steps": "实现步骤",
+  "articles.pitfalls": "踩过的坑",
+  "articles.cause": "原因：",
+  "articles.fix": "解决：",
+  "articles.reading": "源码导读",
+  "section.howItWorks": "实现原理",
+  "section.notes": "补充说明",
+  "section.presets": "预设模板",
+  "tools.heading": "全部工具详解",
+  "tools.intro": "每个工具都包含：用途、参数表、预设模板，以及对应的源码。",
+  "badge.automatic": "拖入即显示",
+  "badge.inPlace": "原地修改",
+  "badge.needsFFmpeg": "需要 ffmpeg",
+  "badge.needs7z": "需要 7z",
+  "nav.appendix": "附录",
+  "source.lineRange": "{file} 第 {start}–{end} 行",
+  "code.tree": "Sources/\n├── App/          应用入口、全局状态、窗口、侧边栏、检查器、设置\n├── Design/       配色、排版、组件库、参数控件\n├── Core/         进程封装、任务队列、工具模型、媒体探测、设置、预估、哈希、日志\n├── Codecs/       GIF 编码器（LZW + 中位切分量化）、WebP 编码器\n└── Features/\n    ├── Video/    18 个视频工具 + 文字渲染\n    ├── Image/    10 个图片工具 + GIF 构建器\n    ├── Document/ 17 个文档工具 + Markdown 双向转换器\n    ├── Archive/  压缩、解压\n    ├── Inspect/  3 个自动显示工具\n    └── ToolRegistry.swift   全部工具的注册表",
+  "code.buildCommands.title": "构建命令",
+  "table.headerRow": "<table><thead><tr><th>参数</th><th>名称</th><th>类型</th><th>取值</th><th>默认</th><th>说明</th></tr></thead><tbody>",
+  "source.fileMeta": "{rel} · {lines} 行"
+ },
+ "blocks": {
+  "overview": "\n<section id=\"overview\">\n<h2>项目概览</h2>\n<p>FormatForge 是一个 macOS 原生的格式转换工具，使用 SwiftUI 编写，<b>不依赖任何第三方\nSwift 包</b>。所有处理都在本机完成，不上传任何数据。</p>\n\n<div class=\"stats\">\n  <div class=\"stat\"><b>{len(tools)}</b><span>个工具</span></div>\n  <div class=\"stat\"><b>{len(swift_files)}</b><span>个源文件</span></div>\n  <div class=\"stat\"><b>{total_lines:,}</b><span>行 Swift</span></div>\n  <div class=\"stat\"><b>{total_params}</b><span>个可调参数</span></div>\n  <div class=\"stat\"><b>{total_presets}</b><span>个预设模板</span></div>\n</div>\n\n<h3>三类工具，三种交互</h3>\n<p>这是本项目最重要的设计决定。不同性质的功能不应该共用同一套交互流程：</p>\n<table>\n<thead><tr><th>类别</th><th>交互方式</th><th>工具</th></tr></thead>\n<tbody>\n<tr><td><b>检查类</b></td><td>拖入文件即自动显示结果；<b>没有按钮</b>、不进任务队列、不问保存位置</td>\n<td>{\", \".join(html.escape(t[\"name\"]) for t in tools if t[\"isInspection\"])}</td></tr>\n<tr><td><b>转换类</b></td><td>选预设 → 调参数 → 点按钮 → 后台队列执行</td>\n<td>{sum(1 for t in tools if t[\"resultKind\"] == \"files\")} 个</td></tr>\n<tr><td><b>原地修改</b></td><td>直接作用于文件本身，不产生新文件</td>\n<td>{\", \".join(html.escape(t[\"name\"]) for t in tools if t[\"resultKind\"] == \"inPlace\")}</td></tr>\n</tbody>\n</table>\n\n<h3>每个工具拥有独立会话</h3>\n<p>53 个工具各自持有输入、参数、预设与输出目录（<code>ToolSession</code>）。\n切换工具只是切换显示对象，因此<b>可以同时在不同工具上作业</b>——\n例如在「视频压缩」跑长任务的同时，切到「文件校验值」算另一个文件的哈希。</p>\n</section>\n",
+  "quickstart": "\n<section id=\"quickstart\">\n<h2>快速开始</h2>\n\n<h3>直接使用（推荐）</h3>\n<p>打开 DMG，把 <code>FormatForge.app</code> 拖入「应用程序」即可。应用已内嵌\nffmpeg、ffprobe、7z 与 cwebp，<b>无需安装 Homebrew 或任何依赖</b>。</p>\n<div class=\"note\"><b>首次打开：</b>本应用未使用 Apple 开发者签名，若被系统拦截，\n请右键点击图标 → 选择「打开」→ 在弹窗中再点「打开」。之后即可正常双击启动。</div>\n\n<h3>从源码构建</h3>\n",
+  "dependencies": "\n<h3>依赖</h3>\n<table>\n<thead><tr><th>组件</th><th>用途</th><th>DMG 中是否已内嵌</th></tr></thead>\n<tbody>\n<tr><td><code>ffmpeg</code> / <code>ffprobe</code></td><td>全部视频功能</td>\n<td>✅ 已内嵌（静态链接，通用二进制）</td></tr>\n<tr><td><code>7z</code></td><td>加密分卷压缩</td><td>✅ 已内嵌（arm64 静态）</td></tr>\n<tr><td><code>cwebp</code></td><td>WebP 输出</td><td>✅ 已内嵌（含 8 个动态库）</td></tr>\n<tr><td><code>textutil</code></td><td>文档转换兜底</td><td>系统自带</td></tr>\n</tbody>\n</table>\n<p>从源码构建时若缺少这些工具，可用 <code>brew install ffmpeg p7zip webp</code> 安装；\n应用会优先使用内嵌版本，找不到时才回退到系统安装。</p>\n</section>\n",
+  "architecture": "\n<section id=\"architecture\">\n<h2>架构总览</h2>\n<p>代码分为四层，依赖方向严格单向：<b>Features → Core → Codecs / Design → App</b>。</p>\n",
+  "dataflow": "\n<h3>一次转换的完整数据流</h3>\n<pre class=\"code text\" style=\"background:var(--bg-code);border:1px solid var(--line);\nborder-radius:10px;padding:16px;overflow-x:auto\"><code>用户拖入文件\n   │\n   ▼\nToolSession.inputs          ← 每个工具独立保存\n   │\n   ├─► 检查类工具 ──► FileInspector.inspect() ──► InspectionReport ──► 内联显示\n   │                                                                    （无按钮）\n   │\n   └─► 转换类工具\n         │\n         ▼\n   AppState.run()\n         │  解析输出目录（可能弹窗询问）\n         ▼\n   JobQueue.enqueue(tool, context, estimate)\n         │\n         ▼\n   Job 创建 ──► JobLogger ──► 日志面板\n         │\n         ▼\n   tool.run(context)          ← 每个工具自己的实现\n         │\n         ├─► FFmpeg.execute() ──► ProcessRunner.run()\n         │                            │\n         │                            ├─► stdout: -progress pipe:1 ──► 进度百分比\n         │                            └─► stderr: 日志输出\n         ▼\n   FileIO.commit()            ← 处理同名冲突\n         │\n         ▼\n   JobState.finished([URL])   ← 汇总体积、计算节省比例、写日志</code></pre>\n</section>\n",
+  "deps": "\n<section id=\"deps\">\n<h3>依赖说明</h3>\n<p>应用本身<b>零第三方 Swift 依赖</b>。所有图像、文档、哈希、压缩能力都来自系统框架：\nFoundation、SwiftUI、AppKit、AVFoundation、ImageIO、CoreGraphics、CoreText、PDFKit、\nVision、CryptoKit、Compression、UniformTypeIdentifiers。</p>\n<p>只有视频编码、7z 加密分卷与 WebP 编码需要外部可执行文件，它们在 DMG 中已全部内嵌。</p>\n<table>\n<thead><tr><th>工具</th><th>为什么需要</th><th>为何不自己实现</th></tr></thead>\n<tbody>\n<tr><td>ffmpeg</td><td>视频编解码、滤镜、封装</td>\n<td>涵盖上百种编解码器与硬件加速，自行实现不现实</td></tr>\n<tr><td>7z</td><td>AES-256 加密分卷</td>\n<td>需要与既有压缩格式完全兼容</td></tr>\n<tr><td>cwebp</td><td>WebP 有损/无损编码</td>\n<td>macOS 的 ImageIO 只能读 WebP，不能写</td></tr>\n</tbody>\n</table>\n<div class=\"note warn\"><b>一处已知取舍：</b>7z 内嵌版本为 arm64。Intel Mac 上若需要加密分卷，\n需自行安装 <code>p7zip</code>；其余功能均不受影响。</div>\n</section>\n\n<section id=\"testing\">\n<h3>测试与验证</h3>\n<p>项目自带 <code>test.sh</code>，用真实素材跑通 91 项检查。它检查的是<b>行为</b>而非文件是否存在：</p>\n<ul>\n<li>修改 MD5 后帧数完全一致 —— 证明画面确实没有被重新编码</li>\n<li>分卷压缩用错误密码必须失败、正确密码必须成功</li>\n<li>视频压缩后体积必须减小（实测减少 78%）</li>\n<li>GIF 必须是多帧动画</li>\n<li>三种适配方式必须产生不同几何，防止选项沦为摆设</li>\n<li>中文文件名（含空格与全角括号）必须完整保留</li>\n<li>损坏视频与空文件必须被明确拒绝</li>\n<li>五种校验值与系统 <code>md5</code> / <code>shasum</code> / <code>zlib.crc32</code> 逐一比对</li>\n<li>拖入文件后必须自动生成结果，无需点击</li>\n</ul>\n</section>\n"
+ }
+}

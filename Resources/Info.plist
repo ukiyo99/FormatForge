@@ -1,0 +1,59 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>CFBundleName</key>
+    <string>FormatForge</string>
+    <key>CFBundleDisplayName</key>
+    <string>FormatForge</string>
+    <key>CFBundleExecutable</key>
+    <string>FormatForge</string>
+    <key>CFBundleIdentifier</key>
+    <string>com.formatforge.app</string>
+    <key>CFBundleVersion</key>
+    <string>1.0</string>
+    <key>CFBundleShortVersionString</key>
+    <string>1.0</string>
+    <key>CFBundlePackageType</key>
+    <string>APPL</string>
+    <key>CFBundleIconFile</key>
+    <string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key>
+    <string>14.0</string>
+    <key>NSHighResolutionCapable</key>
+    <true/>
+    <key>NSPrincipalClass</key>
+    <string>NSApplication</string>
+    <key>NSSupportsAutomaticTermination</key>
+    <true/>
+    <key>NSSupportsSuddenTermination</key>
+    <true/>
+    <key>NSHumanReadableCopyright</key>
+    <string>FormatForge — 本机离线格式转换工具</string>
+    <key>CFBundleDocumentTypes</key>
+    <array>
+        <dict>
+            <key>CFBundleTypeName</key>
+            <string>媒体与文档文件</string>
+            <key>CFBundleTypeRole</key>
+            <string>Viewer</string>
+            <key>LSHandlerRank</key>
+            <string>Alternate</string>
+            <key>LSItemContentTypes</key>
+            <array>
+                <string>public.movie</string>
+                <string>public.video</string>
+                <string>public.audio</string>
+                <string>public.image</string>
+                <string>public.pdf</string>
+                <string>public.plain-text</string>
+                <string>public.rtf</string>
+                <string>org.openxmlformats.wordprocessingml.document</string>
+                <string>com.microsoft.word.doc</string>
+                <string>net.daringfireball.markdown</string>
+                <string>public.zip-archive</string>
+            </array>
+        </dict>
+    </array>
+</dict>
+</plist>
