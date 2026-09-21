@@ -11,8 +11,9 @@ anything over the network.
 
 ![FormatForge](docs/screenshot.png)
 
-*(That's a placeholder — I'd rather ship a real screenshot than a mock-up.
-Replace `docs/screenshot.png` with a capture of your own.)*
+Video compression, with two files staged and an estimated output size on the run
+bar. Every tool keeps its own inputs, so you can start a long encode here and
+work in another tool while it runs.
 
 ---
 
