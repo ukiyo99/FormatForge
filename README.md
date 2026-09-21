@@ -9,7 +9,7 @@ websites upload your files somewhere. The command-line tools each have their own
 syntax to remember. So this is one app that does the lot, and never sends
 anything over the network.
 
-![FormatForge](docs/screenshot.png)
+![FormatForge]([docs/screenshot.png](https://github.com/ukiyo99/FormatForge/blob/main/Resources/AppIcon-source.png))
 
 Video compression, with two files staged and an estimated output size on the run
 bar. Every tool keeps its own inputs, so you can start a long encode here and
